@@ -6,7 +6,10 @@ import sys
 import subprocess
 from pathlib import Path
 import importlib.util
-from theme.theme_dark import DARK_STYLESHEET
+from .theme.theme_dark import DARK_STYLESHEET
+from .components import HeaderBar, SideNav, LoadingIndicator
+from .view import HomeView, AnalysisView, ExportView, SettingsView
+
 
 # Carpeta donde está este main.py
 BASE_DIR = Path(__file__).resolve().parent      # ...\proyecto\source

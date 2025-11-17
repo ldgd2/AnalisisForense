@@ -4,58 +4,34 @@
 """
 Lanzador único del proyecto.
 
-Desde aquí se arranca primero setup.py para verificar/instalar
-todo lo necesario y luego la GUI definida en source/main.py
-
-Uso:
-    python main.py
+- En modo normal (python main.py): ejecuta setup.py y luego la GUI.
+- En modo exe (PyInstaller): llama directamente a la GUI empaquetada.
 """
 
 import sys
-import subprocess
 from pathlib import Path
-
 
 ROOT_DIR = Path(__file__).resolve().parent
 
-SOURCE_MAIN = ROOT_DIR / "source" / "main.py"
-
-SETUP_SCRIPT = ROOT_DIR / "setup.py"
-
-
-def run_setup():
-    """Ejecuta setup.py antes de lanzar la GUI."""
-    if not SETUP_SCRIPT.exists():
-        print(f"[AVISO] No se encontró setup.py en: {SETUP_SCRIPT}")
-        print("        Se omite la verificación de entorno.")
-        return
-
-    print("==============================================")
-    print("  Ejecutando setup.py (verificación de entorno)")
-    print("==============================================\n")
-
-    result = subprocess.run(
-        [sys.executable, str(SETUP_SCRIPT)],
-        cwd=str(ROOT_DIR),
-    )
-
-    if result.returncode != 0:
-        print("\n[ERROR] setup.py terminó con errores.")
-        print("Revisa los mensajes anteriores y corrige antes de volver a ejecutar.")
-        sys.exit(result.returncode)
-
 
 def main():
-    # 1) Verificar/instalar dependencias
-    run_setup()
+    # Aseguramos que la raíz y source estén en sys.path cuando se ejecuta con Python normal
+    source_dir = ROOT_DIR / "source"
+    for p in (ROOT_DIR, source_dir):
+        if str(p) not in sys.path:
+            sys.path.insert(0, str(p))
 
-    # 2) Lanzar GUI
-    if not SOURCE_MAIN.exists():
-        raise FileNotFoundError(f"No se encontró el archivo: {SOURCE_MAIN}")
-    subprocess.run(
-        [sys.executable, str(SOURCE_MAIN)],
-        cwd=str(SOURCE_MAIN.parent),  
-    )
+    # Si NO estamos congelados (desarrollo) → ejecuta setup.py antes de abrir la GUI
+    if not getattr(sys, "frozen", False):
+        try:
+            import setup
+            setup.main()
+        except Exception as e:
+            print(f"[SETUP] Ocurrió un error en setup.py: {e}")
+
+    # Ahora importamos y lanzamos la GUI
+    from source.main import main as gui_main
+    gui_main()
 
 
 if __name__ == "__main__":
