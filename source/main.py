@@ -6,28 +6,31 @@ import sys
 import subprocess
 from pathlib import Path
 import importlib.util
-from .theme.theme_dark import DARK_STYLESHEET
-from .components import HeaderBar, SideNav, LoadingIndicator
-from .view import HomeView, AnalysisView, ExportView, SettingsView
 
-
-# Carpeta donde está este main.py
+# --------------------------------------------------
+#  RUTAS BASE
+# --------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parent      # ...\proyecto\source
 PROJECT_ROOT = BASE_DIR.parent                  # ...\proyecto
 
-# Asegurar que ambas estén en sys.path
 for p in {BASE_DIR, PROJECT_ROOT}:
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))
 
 
-# ======================================================
-#  Helper para cargar módulos por ruta
-# ======================================================
+def is_frozen() -> bool:
+    """Indica si estamos corriendo desde un ejecutable de PyInstaller."""
+    return getattr(sys, "frozen", False)
+
+
+# --------------------------------------------------
+#  BACKEND (analisis, exportacion, setup)
+# --------------------------------------------------
 def load_backend(name: str):
     """
     Carga name.py buscando primero en source/ y luego en la carpeta raíz del proyecto.
     Registra el módulo en sys.modules[name].
+    Solo se usa en modo 'no congelado' (cuando corremos desde código fuente).
     """
     candidates = [
         BASE_DIR / f"{name}.py",        # ...\proyecto\source\analisis.py
@@ -36,26 +39,31 @@ def load_backend(name: str):
 
     for path in candidates:
         if path.exists():
-           spec = importlib.util.spec_from_file_location(name, path)
-           module = importlib.util.module_from_spec(spec)
-           sys.modules[name] = module
-           assert spec.loader is not None
-           spec.loader.exec_module(module)
-           return module
+            spec = importlib.util.spec_from_file_location(name, path)
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[name] = module
+            assert spec.loader is not None
+            spec.loader.exec_module(module)
+            return module
 
     msg = "No se encontró {0}.py en ninguna de estas rutas:\n  ".format(name)
     msg += "\n  ".join(str(p) for p in candidates)
     raise FileNotFoundError(msg)
 
 
-# ---- BACKEND cargado explícitamente (ya NO usamos `import analisis`) ----
-analisis = load_backend("analisis")          # source/analisis.py
-exportacion = load_backend("exportacion")    # source/exportacion.py
-setup_module = load_backend("setup")         # source/setup.py
+if is_frozen():
+    import analisis          # type: ignore
+    import exportacion       # type: ignore
+    import setup as setup_module  # type: ignore
+else:
+    analisis = load_backend("analisis")
+    exportacion = load_backend("exportacion")
+    setup_module = load_backend("setup")
 
-# ======================================================
-#  Imports de PySide y UI
-# ======================================================
+
+# --------------------------------------------------
+#  IMPORTS DE UI (SIEMPRE RELATIVOS)
+# --------------------------------------------------
 from PySide6.QtCore import (
     Qt,
     QPropertyAnimation,
@@ -74,9 +82,10 @@ from PySide6.QtWidgets import (
     QGraphicsOpacityEffect,
 )
 
-from theme import DARK_STYLESHEET
-from components import HeaderBar, SideNav, LoadingIndicator
-from view import HomeView, AnalysisView, ExportView, SettingsView
+# 👇 IMPORTS RELATIVOS, NO DUPLICADOS
+from .theme.theme_dark import DARK_STYLESHEET
+from .components import HeaderBar, SideNav, LoadingIndicator
+from .view import HomeView, AnalysisView, ExportView, SettingsView
 
 
 # ======================================================
@@ -101,7 +110,6 @@ class AnalysisWorker(QThread):
         self.base_dir = base_dir
 
     def run(self):
-        # Usamos el módulo analisis cargado arriba
         global analisis
 
         analyzer = analisis.AndroidForensicAnalysis(base_dir=self.base_dir)
@@ -330,8 +338,13 @@ class MainWindow(QMainWindow):
 
         cfg = self.analysis_view.get_config()
 
+        base_dir = PROJECT_ROOT
+        if is_frozen():
+
+            base_dir = Path(sys.executable).resolve().parent
+
         # Crear worker
-        self.analysis_worker = AnalysisWorker(cfg, PROJECT_ROOT, self)
+        self.analysis_worker = AnalysisWorker(cfg, base_dir, self)
         self.analysis_worker.progress.connect(self.on_analysis_progress)
         self.analysis_worker.finished_ok.connect(self.on_analysis_finished_ok)
         self.analysis_worker.error.connect(self.on_analysis_error)

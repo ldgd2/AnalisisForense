@@ -2,7 +2,7 @@
 
 
 a = Analysis(
-    ['source\\main.py'],
+    ['main.py'],
     pathex=[],
     binaries=[],
     datas=[('source\\files\\abe.jar', 'source\\files')],
