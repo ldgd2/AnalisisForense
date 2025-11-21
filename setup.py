@@ -29,7 +29,8 @@ PLATFORM_TOOLS_URL = (
 # Paquetes de Python que tu proyecto necesita
 REQUIRED_PYTHON_PACKAGES = [
     "pandas",
-    "PySide6"
+    "PySide6",
+    "openpyxl"
     # agrega aquí más paquetes si los usas: "numpy", "matplotlib", ...
 ]
 

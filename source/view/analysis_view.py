@@ -1,125 +1,226 @@
 # source/view/analysis_view.py
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QGroupBox, QHBoxLayout,
-    QLabel, QLineEdit, QComboBox, QCheckBox, QPushButton
+    QWidget, QVBoxLayout, QHBoxLayout, QGroupBox,
+    QLabel, QLineEdit, QPushButton, QSplitter, QStackedWidget
 )
+
+# 👇 Importamos tus componentes
+from components.mode_selector import ModeSelector
+from components.panel.noroot_options_panel import NoRootOptionsPanel
+from components.panel.root_options_panel import RootOptionsPanel
+from components.panel.artifact_summary_panel import ArtifactSummaryPanel
+from components.panel.log_panel import LogPanel
 
 
 class AnalysisView(QWidget):
+    """
+    Vista principal de ANÁLISIS que integra:
+    - Nombre del caso
+    - ModeSelector (modo NOROOT/ROOT + perfil + formato)
+    - Panel de opciones NOROOT / ROOT (stack intercambiable)
+    - Resumen de artefactos
+    - Panel de log de ejecución
+    """
+
     def __init__(self, parent=None):
         super().__init__(parent)
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 24, 24, 24)
-        layout.setSpacing(16)
+        main = QVBoxLayout(self)
+        main.setContentsMargins(16, 16, 16, 16)
+        main.setSpacing(12)
 
-        # --- Caso y formato ---
-        gb_case = QGroupBox("Caso y formato")
-        case_layout = QVBoxLayout(gb_case)
+        # ==========================================================
+        # TOP: Nombre de caso + ModeSelector
+        # ==========================================================
+        top_row = QHBoxLayout()
+        top_row.setSpacing(16)
 
-        row1 = QHBoxLayout()
+        # --- Caso ---
+        gb_case = QGroupBox("Caso")
+        lay_case = QVBoxLayout(gb_case)
+        lay_case.setContentsMargins(8, 8, 8, 8)
+
+        row_case = QHBoxLayout()
         lbl_case = QLabel("Nombre del caso:")
         self.case_name_edit = QLineEdit()
         self.case_name_edit.setPlaceholderText("Ej. caso01, dispositivo_Juan, etc.")
-        row1.addWidget(lbl_case)
-        row1.addWidget(self.case_name_edit)
-        case_layout.addLayout(row1)
+        row_case.addWidget(lbl_case)
+        row_case.addWidget(self.case_name_edit, 1)
 
-        row2 = QHBoxLayout()
-        lbl_format = QLabel("Formato principal:")
-        self.format_combo = QComboBox()
-        self.format_combo.addItems([
-            "Completo (RAW solo, máximo detalle técnico)",
-            "Legible (RAW + CSV legibles + resumen Excel)",
-        ])
-        self.format_combo.setCurrentIndex(1)
-        row2.addWidget(lbl_format)
-        row2.addWidget(self.format_combo)
-        case_layout.addLayout(row2)
+        lay_case.addLayout(row_case)
 
-        layout.addWidget(gb_case)
+        top_row.addWidget(gb_case, 2)
 
-        # --- Opciones de extracción ---
-        gb_extract = QGroupBox("Opciones de extracción")
-        ext_layout = QVBoxLayout(gb_extract)
+        # --- ModeSelector (modo / perfil / formato) ---
+        self.mode_selector = ModeSelector()
+        top_row.addWidget(self.mode_selector, 3)
 
-        row_mode = QHBoxLayout()
-        lbl_mode = QLabel("Modo de análisis:")
-        self.mode_combo = QComboBox()
-        self.mode_combo.addItems([
-            "No-Root (extracción lógica)",
-            "Root (profundo + lógica)",
-        ])
-        self.mode_combo.setCurrentIndex(0)
-        row_mode.addWidget(lbl_mode)
-        row_mode.addWidget(self.mode_combo)
-        ext_layout.addLayout(row_mode)
+        main.addLayout(top_row)
 
-        self.chk_backup_logico = QCheckBox(
-            "Generar backup lógico con 'adb backup -apk -shared -all'"
-        )
-        self.chk_backup_logico.setChecked(False)
+        # ==========================================================
+        # CENTRO: opciones + resumen + log
+        # ==========================================================
+        splitter = QSplitter(Qt.Horizontal)
 
-        self.chk_media_no_root = QCheckBox(
-            "Extraer multimedia lógica (/sdcard/DCIM, Pictures, Movies, WhatsApp/Media)"
-        )
-        self.chk_media_no_root.setChecked(False)
+        # --------- LADO IZQUIERDO: Opciones de extracción ----------
+        left_container = QWidget()
+        left_layout = QVBoxLayout(left_container)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(8)
 
-        ext_layout.addWidget(self.chk_backup_logico)
-        ext_layout.addWidget(self.chk_media_no_root)
+        gb_opts = QGroupBox("Opciones de extracción")
+        lay_opts = QVBoxLayout(gb_opts)
+        lay_opts.setContentsMargins(8, 8, 8, 8)
 
-        layout.addWidget(gb_extract)
+        # Stack con NOROOT / ROOT
+        self.options_stack = QStackedWidget()
+        self.noroot_panel = NoRootOptionsPanel()
+        self.root_panel = RootOptionsPanel()
+        self.options_stack.addWidget(self.noroot_panel)  # index 0 -> NOROOT
+        self.options_stack.addWidget(self.root_panel)    # index 1 -> ROOT
 
-        # --- Opciones ROOT ---
-        gb_root = QGroupBox("Opciones avanzadas (solo si el modo es ROOT)")
-        root_layout = QVBoxLayout(gb_root)
+        lay_opts.addWidget(self.options_stack)
+        left_layout.addWidget(gb_opts)
 
-        self.chk_sdcard_root = QCheckBox(
-            "Extraer TODO /sdcard completo (muy pesado)"
-        )
-        self.chk_sdcard_root.setChecked(False)
+        splitter.addWidget(left_container)
 
-        self.chk_dd_root = QCheckBox(
-            "Crear imagen dd de /data (userdata.img) (muy pesado, avanzado)"
-        )
-        self.chk_dd_root.setChecked(False)
+        # --------- LADO DERECHO: Resumen + Log ----------
+        right_container = QWidget()
+        right_layout = QVBoxLayout(right_container)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(8)
 
-        self.chk_excel_resumen = QCheckBox(
-            "Crear archivo Excel resumen (contactos, llamadas, SMS, calendario)"
-        )
-        self.chk_excel_resumen.setChecked(True)
+        # Resumen de artefactos
+        gb_summary = QGroupBox("Resumen de artefactos")
+        lay_summary = QVBoxLayout(gb_summary)
+        lay_summary.setContentsMargins(8, 8, 8, 8)
 
-        root_layout.addWidget(self.chk_sdcard_root)
-        root_layout.addWidget(self.chk_dd_root)
-        root_layout.addWidget(self.chk_excel_resumen)
+        self.summary_panel = ArtifactSummaryPanel()
+        lay_summary.addWidget(self.summary_panel)
 
-        layout.addWidget(gb_root)
+        # Log de ejecución
+        gb_log = QGroupBox("Registro de ejecución")
+        lay_log = QVBoxLayout(gb_log)
+        lay_log.setContentsMargins(0, 0, 0, 0)
 
-        # --- Botón ejecutar ---
+        self.log_panel = LogPanel()
+        lay_log.addWidget(self.log_panel)
+
+        right_layout.addWidget(gb_summary)
+        right_layout.addWidget(gb_log, 1)
+
+        splitter.addWidget(right_container)
+
+        # Un poco de tamaño inicial razonable
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 4)
+
+        main.addWidget(splitter, 1)
+
+        # ==========================================================
+        # BOTTOM: botón de ejecución
+        # ==========================================================
         self.btn_run = QPushButton("Iniciar análisis y exportación")
         self.btn_run.setFixedHeight(40)
         self.btn_run.setCursor(Qt.PointingHandCursor)
+        main.addWidget(self.btn_run, alignment=Qt.AlignRight)
 
-        layout.addSpacing(8)
-        layout.addWidget(self.btn_run, alignment=Qt.AlignRight)
-        layout.addStretch()
+        # ==========================================================
+        # Conexiones de señales
+        # ==========================================================
+        self.mode_selector.modeChanged.connect(self._on_mode_changed)
 
-    # Método para que el MainWindow lea toda la config de esta vista:
+        # aplicar estado inicial (NOROOT)
+        self._on_mode_changed(self.mode_selector.current_mode())
+
+    # --------------------------------------------------------------
+    # Dinámica de UI
+    # --------------------------------------------------------------
+    def _on_mode_changed(self, mode: str):
+        """
+        Cambia el panel visible según el modo:
+        - "NOROOT" -> NoRootOptionsPanel
+        - "ROOT"   -> RootOptionsPanel
+        """
+        if mode == "ROOT":
+            self.options_stack.setCurrentWidget(self.root_panel)
+        else:
+            self.options_stack.setCurrentWidget(self.noroot_panel)
+
+    # --------------------------------------------------------------
+    # Lectura de configuración para analisis.py
+    # --------------------------------------------------------------
     def get_config(self) -> dict:
-        case_name = self.case_name_edit.text().strip() or "caso"
-        fmt_idx = self.format_combo.currentIndex()
-        format_mode = "C" if fmt_idx == 0 else "L"
-        mode_idx = self.mode_combo.currentIndex()
-        mode_root = (mode_idx == 1)
+        """
+        Devuelve un dict de configuración combinando:
+        - Nombre del caso
+        - ModeSelector (modo / perfil / formato)
+        - Opciones NOROOT / ROOT desde sus paneles
 
-        return {
+        Mantiene claves compatibles con la versión anterior
+        (nr_* y algunos sdcard_root / dd_root / excel_resumen)
+        y además incluye subdicts:
+        - "noroot_options"
+        - "root_options"
+        """
+        case_name = self.case_name_edit.text().strip() or "caso"
+
+        settings = self.mode_selector.get_settings()
+        mode = settings["mode"]           # "NOROOT" o "ROOT"
+        profile = settings["profile"]     # "rapido", "completo", "whatsapp_media"
+        fmt = settings["format"]          # "L" o "C"
+
+        mode_root = (mode == "ROOT")
+
+        config: dict = {
             "case_name": case_name,
-            "format_mode": format_mode,
+            "format_mode": fmt,   # "L" o "C"
             "mode_root": mode_root,
-            "backup_logico": self.chk_backup_logico.isChecked(),
-            "media_no_root": self.chk_media_no_root.isChecked(),
-            "sdcard_root": self.chk_sdcard_root.isChecked(),
-            "dd_root": self.chk_dd_root.isChecked(),
-            "excel_resumen": self.chk_excel_resumen.isChecked(),
+            "profile": profile,
         }
+
+        if mode_root:
+            # -------- ROOT --------
+            root_opts = self.root_panel.to_dict()
+            config["root_options"] = root_opts
+
+            # Compatibilidad con versión antigua:
+            # sdcard_root  -> copiar /sdcard entero
+            # dd_root      -> imagen userdata
+            # excel_resumen -> según formato legible
+            config["sdcard_root"] = root_opts.get("copy_sdcard_entire", False)
+            config["dd_root"] = root_opts.get("userdata_image", False)
+            config["excel_resumen"] = (fmt == "L")
+        else:
+            # -------- NO-ROOT --------
+            nr_opts = self.noroot_panel.to_dict()
+            config["noroot_options"] = nr_opts
+
+            # Mapear a claves antiguas nr_*
+            mapping = {
+                "contacts": "nr_contacts",
+                "calllog": "nr_calllog",
+                "sms": "nr_sms",
+                "calendar": "nr_calendar",
+                "downloads_list": "nr_downloads_list",
+                "chrome_provider": "nr_chrome_provider",
+                "browser_provider": "nr_browser_provider",
+                "gps_dumpsys": "nr_gps_dumpsys",
+                "wifi_dumpsys": "nr_wifi_dumpsys",
+                "net_basic": "nr_net_basic",
+                "package_meta": "nr_package_meta",
+                "apks": "nr_apks",
+                "logcat_dump": "nr_logcat_dump",
+                "bugreport_zip": "nr_bugreport_zip",
+                "adb_backup_all": "nr_adb_backup_all",
+                "whatsapp_public": "nr_whatsapp_public",
+                "whatsapp_media": "nr_whatsapp_media",
+                "copy_device_files": "nr_copy_device_files",
+                "copy_sdcard_entire": "nr_copy_sdcard_entire",
+                "exif_inventory": "nr_exif_inventory",
+            }
+            for src, dst in mapping.items():
+                config[dst] = nr_opts.get(src, False)
+
+        return config

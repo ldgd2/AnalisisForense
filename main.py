@@ -1,22 +1,27 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-from pathlib import Path
+from __future__ import annotations
+
 import sys
+from pathlib import Path
 
-ROOT_DIR = Path(__file__).resolve().parent
+# Directorio raíz del proyecto (donde está este main.py)
+ROOT_DIR = Path(__file__).resolve().parent          # .../proyecto
 
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
+# Rutas importantes
+SOURCE_DIR = ROOT_DIR / "source"                    # .../proyecto/source
+CORE_DIR = ROOT_DIR / "class" / "core"              # .../proyecto/class/core
 
-from setup import main as setup_main         
-from source.main import main as gui_main    
+# Añadimos carpetas al sys.path para que los imports funcionen
+for p in (SOURCE_DIR, CORE_DIR):
+    if p.is_dir() and str(p) not in sys.path:
+        sys.path.insert(0, str(p))
 
-
-def main():
-    setup_main()
-    gui_main()
+# Ahora ya podemos importar la interfaz sin problemas
+from interfaz import run_gui
 
 
 if __name__ == "__main__":
-    main()
+    # base_dir lo usamos para crear /casos, /logs, etc.
+    run_gui(base_dir=ROOT_DIR)

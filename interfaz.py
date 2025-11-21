@@ -4,31 +4,52 @@
 """
 interfaz.py
 -----------
-Interfaz gráfica moderna para Android Forensic Extractor.
+Ventana principal del Android Forensic Extractor.
 
-- Usa PySide6 (Qt) con modo oscuro y pequeñas animaciones.
-- Llama a:
-    * analisis.AndroidForensicAnalysis para ejecutar:
-        - No-Root (lógico)
-        - Root (profundo)
-      y luego run_export(...) que usa exportacion.py
-    * setup.main() para configurar entorno y ADB.
-    * exportacion.py en una consola aparte si quieres
-      re-exportar un caso de forma manual (CLI).
-
-Requisitos:
-    pip install PySide6
-
-Recomendado: añadir "PySide6" a REQUIRED_PYTHON_PACKAGES de setup.py
-para que se instale automáticamente.
+Estructura:
+- QMainWindow con tema oscuro.
+- HeaderBar arriba (título + detección de dispositivo).
+- SideNav a la izquierda (Inicio / Análisis / Exportación / Configuración).
+- QStackedWidget a la derecha con:
+    * HomeView
+    * AnalysisView
+    * ExportView (placeholder si no existe)
+    * SettingsView
+- LoadingIndicator abajo para mostrar el progreso global.
+- Usa forensic_bridge.run_forensic_from_cfg() en un QThread para no
+  congelar la interfaz.
 """
 
-import os
+from __future__ import annotations
+
+from __future__ import annotations
+
 import sys
-import subprocess
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QEasingCurve, QPropertyAnimation, QRect
+# --- Asegurar que /source está en sys.path aunque llamen este archivo directamente ---
+
+BASE_DIR = Path(__file__).resolve().parent        # carpeta donde está interfaz.py
+SOURCE_DIR = BASE_DIR / "source"                  # proyecto/source
+
+if str(SOURCE_DIR) not in sys.path:
+    sys.path.insert(0, str(SOURCE_DIR))
+
+# A partir de aquí ya podemos importar los módulos dentro de /source
+from PySide6.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QStackedWidget
+from PySide6.QtCore import Qt, QThread, Signal, QObject
+
+from theme.theme_dark import DARK_STYLESHEET
+from components.header_bar import HeaderBar
+from components.side_nav import SideNav
+from components.loading_indicator import LoadingIndicator
+
+from view.home_view import HomeView
+from view.analysis_view import AnalysisView
+from view.settings_view import SettingsView
+from forensic_bridge import run_forensic_from_cfg
+
+from PySide6.QtCore import Qt, QObject, Signal, Slot, QThread
 from PySide6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -36,617 +57,290 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QHBoxLayout,
     QStackedWidget,
-    QPushButton,
     QLabel,
-    QLineEdit,
-    QComboBox,
-    QCheckBox,
-    QFrame,
     QMessageBox,
-    QSizePolicy,
-    QSpacerItem,
-    QGroupBox,
-    QGraphicsOpacityEffect,
 )
 
-# Importamos tus módulos
-import analisis
-import setup as setup_module  # setup.py
 
 
-BASE_DIR = Path(__file__).resolve().parent
+
+# ----------------------------------------------------------------------
+# ExportView: si la tienes en view/export_view.py, se usa; si no, placeholder
+# ----------------------------------------------------------------------
+try:
+    from view.export_view import ExportView  # type: ignore
+except ImportError:
+    class ExportView(QWidget):
+        def __init__(self, parent=None):
+            super().__init__(parent)
+            lay = QVBoxLayout(self)
+            lbl = QLabel(
+                "<b>Exportación</b><br><br>"
+                "Vista de exportación aún no implementada.<br>"
+                "Puedes crear view/export_view.py más adelante."
+            )
+            lbl.setWordWrap(True)
+            lay.addWidget(lbl)
+            lay.addStretch()
 
 
-DARK_STYLESHEET = """
-* {
-    font-family: 'Segoe UI', 'Roboto', sans-serif;
-    font-size: 11pt;
-}
-QMainWindow {
-    background-color: #121212;
-}
-QWidget {
-    background-color: #121212;
-    color: #f5f5f5;
-}
-QFrame#NavFrame {
-    background-color: #0d0d0d;
-}
-QPushButton {
-    background-color: #1f1f1f;
-    border: 1px solid #333333;
-    border-radius: 6px;
-    padding: 6px 12px;
-    color: #f5f5f5;
-}
-QPushButton:hover {
-    background-color: #272727;
-}
-QPushButton:pressed {
-    background-color: #0f766e;
-}
-QPushButton#NavButton {
-    background-color: transparent;
-    border: none;
-    padding: 8px 12px;
-    text-align: left;
-}
-QPushButton#NavButton:hover {
-    background-color: #1f2937;
-}
-QPushButton#NavButton:checked {
-    background-color: #0f172a;
-    color: #22c55e;
-}
-QLineEdit, QComboBox {
-    background-color: #1e1e1e;
-    border: 1px solid #333333;
-    border-radius: 4px;
-    padding: 4px 8px;
-    selection-background-color: #0f766e;
-}
-QGroupBox {
-    border: 1px solid #2a2a2a;
-    border-radius: 8px;
-    margin-top: 20px;
-}
-QGroupBox::title {
-    subcontrol-origin: margin;
-    subcontrol-position: top left;
-    padding: 0 8px;
-    color: #9ca3af;
-}
-QLabel#TitleLabel {
-    font-size: 20px;
-    font-weight: 600;
-}
-QLabel#SubtitleLabel {
-    font-size: 11pt;
-    color: #9ca3af;
-}
-QStatusBar {
-    background-color: #0b0b0b;
-}
-QStatusBar QLabel {
-    color: #9ca3af;
-}
-"""
+# ======================================================================
+# Worker para ejecutar el análisis en segundo plano
+# ======================================================================
 
+class AnalysisWorker(QObject):
+    finished = Signal(str)      # ruta de carpeta del caso
+    error = Signal(str)         # mensaje de error
+    progress = Signal(str)      # mensajes de progreso (logs)
+
+    def __init__(self, cfg: dict, base_dir: Path, parent=None):
+        super().__init__(parent)
+        self._cfg = cfg
+        self._base_dir = base_dir
+
+    @Slot()
+    def run(self):
+        """
+        Ejecuta todo el flujo forense usando forensic_bridge.run_forensic_from_cfg.
+        Emite:
+        - progress(msg) cada vez que el backend informe algo.
+        - finished(case_dir) al terminar bien.
+        - error(str) si ocurre una excepción.
+        """
+        try:
+            case_dir = run_forensic_from_cfg(
+                self._cfg,
+                self._base_dir,
+                progress_cb=self.progress.emit,
+            )
+            self.finished.emit(case_dir)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+# ======================================================================
+# Ventana principal
+# ======================================================================
 
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, base_dir: Path | None = None):
         super().__init__()
 
-        self.setWindowTitle("Android Forensic Extractor - Interfaz gráfica")
-        self.resize(1100, 650)
+        # Base del proyecto (para casos/logs, analisis.py, etc.)
+        self.base_dir: Path = base_dir or Path(__file__).resolve().parent
 
-        # ---- Widgets base ----
+        self.setWindowTitle("Android Forensic Extractor")
+        self.resize(1200, 720)
+
+        # Status bar (aprovecha el estilo del theme_dark)
+        self.statusBar()
+
+        # Flags / referencias de hilo de análisis
+        self._analysis_thread: QThread | None = None
+        self._analysis_worker: AnalysisWorker | None = None
+        self._analysis_running: bool = False
+
+        # ----------------- Central widget -----------------
         central = QWidget()
         self.setCentralWidget(central)
 
-        main_layout = QVBoxLayout(central)
-        main_layout.setContentsMargins(16, 12, 16, 12)
-        main_layout.setSpacing(10)
+        root_layout = QVBoxLayout(central)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+        root_layout.setSpacing(0)
 
-        # Header
-        header = self._build_header()
-        main_layout.addWidget(header)
+        # ========== HEADER ==========
+        self.header_bar = HeaderBar()
+        root_layout.addWidget(self.header_bar)
 
-        # Body (nav izquierda + contenido derecha)
+        # ========== BODY: Nav + vistas ==========
         body = QWidget()
         body_layout = QHBoxLayout(body)
         body_layout.setContentsMargins(0, 0, 0, 0)
         body_layout.setSpacing(0)
 
-        # Nav lateral
-        self.nav_frame, self.nav_buttons, self.nav_indicator = self._build_nav()
-        body_layout.addWidget(self.nav_frame)
+        # Side navigation
+        self.side_nav = SideNav()
+        body_layout.addWidget(self.side_nav)
 
-        # Stack de páginas
-        self.stack = QStackedWidget()
-        self.pages = []
+        # Stacked views
+        self.view_stack = QStackedWidget()
+        self.home_view = HomeView()
+        self.analysis_view = AnalysisView()
+        self.export_view = ExportView()
+        self.settings_view = SettingsView()
 
-        home_page = self._build_home_page()
-        analysis_page = self._build_analysis_page()
-        export_page = self._build_export_page()
-        settings_page = self._build_settings_page()
+        # Orden debe coincidir con SideNav (Inicio, Análisis, Exportación, Configuración)
+        self.view_stack.addWidget(self.home_view)      # index 0
+        self.view_stack.addWidget(self.analysis_view)  # index 1
+        self.view_stack.addWidget(self.export_view)    # index 2
+        self.view_stack.addWidget(self.settings_view)  # index 3
 
-        self.pages.extend([home_page, analysis_page, export_page, settings_page])
+        body_layout.addWidget(self.view_stack, 1)
 
-        for page in self.pages:
-            self.stack.addWidget(page)
+        root_layout.addWidget(body, 1)
 
-        body_layout.addWidget(self.stack)
+        # ========== LOADING INDICATOR ==========
+        self.loading_indicator = LoadingIndicator()
+        root_layout.addWidget(self.loading_indicator)
 
-        main_layout.addWidget(body)
+        # ----------------- Conexiones -----------------
+        self.side_nav.currentIndexChanged.connect(self._on_nav_changed)
 
-        # Status bar
-        self.statusBar().showMessage("Listo.")
+        self.header_bar.deviceDetected.connect(self._on_device_detected)
+        self.header_bar.detectionFailed.connect(self._on_detection_failed)
 
-        # Animación para el indicador de navegación
-        self.nav_anim = QPropertyAnimation(self.nav_indicator, b"geometry", self)
-        self.nav_anim.setDuration(250)
-        self.nav_anim.setEasingCurve(QEasingCurve.OutCubic)
+        self.settings_view.runSetupRequested.connect(self._on_run_setup)
 
-        # Animación de fade para las páginas
-        self.fade_effect = QGraphicsOpacityEffect(self.stack)
-        self.stack.setGraphicsEffect(self.fade_effect)
-        self.fade_anim = QPropertyAnimation(self.fade_effect, b"opacity", self)
-        self.fade_anim.setDuration(220)
-        self.fade_anim.setEasingCurve(QEasingCurve.OutCubic)
+        # Botón principal de análisis
+        self.analysis_view.btn_run.clicked.connect(self._on_run_analysis)
 
-        # Estado por defecto: página 0 (Inicio)
-        self._select_nav(0, animate=False)
+        # Vista inicial
+        self.view_stack.setCurrentIndex(0)
 
-    # ------------------------------------------------------------------
-    # Header
-    # ------------------------------------------------------------------
-    def _build_header(self) -> QWidget:
-        header = QWidget()
-        layout = QHBoxLayout(header)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(12)
+    # ==================================================================
+    # Callbacks de navegación
+    # ==================================================================
 
-        # Títulos
-        title_box = QVBoxLayout()
-        lbl_title = QLabel("Android Forensic Extractor")
-        lbl_title.setObjectName("TitleLabel")
+    def _on_nav_changed(self, index: int):
+        """Cambia la vista activa según el botón del SideNav."""
+        if 0 <= index < self.view_stack.count():
+            self.view_stack.setCurrentIndex(index)
 
-        lbl_sub = QLabel("Análisis forense Android · No-Root y Root")
-        lbl_sub.setObjectName("SubtitleLabel")
+    # ==================================================================
+    # Callbacks de HeaderBar (detección de dispositivo)
+    # ==================================================================
 
-        title_box.addWidget(lbl_title)
-        title_box.addWidget(lbl_sub)
-        layout.addLayout(title_box)
+    def _on_device_detected(self, device_id: str):
+        """Cuando HeaderBar detecta un dispositivo ADB."""
+        self.statusBar().showMessage(f"Dispositivo detectado: {device_id}", 5000)
 
-        layout.addStretch()
-
-        # Estado de dispositivo + botón detectar
-        device_box = QVBoxLayout()
-        self.lbl_device_status = QLabel("Dispositivo: no detectado")
-        self.lbl_device_status.setObjectName("SubtitleLabel")
-
-        btn_detect = QPushButton("Detectar dispositivo ADB")
-        btn_detect.clicked.connect(self.on_detect_device)
-
-        device_box.addWidget(self.lbl_device_status)
-        device_box.addWidget(btn_detect, alignment=Qt.AlignRight)
-
-        layout.addLayout(device_box)
-
-        return header
-
-    # ------------------------------------------------------------------
-    # Navegación lateral
-    # ------------------------------------------------------------------
-    def _build_nav(self):
-        nav_frame = QFrame()
-        nav_frame.setObjectName("NavFrame")
-        nav_frame.setFixedWidth(210)
-        nav_layout = QVBoxLayout(nav_frame)
-        nav_layout.setContentsMargins(8, 16, 8, 16)
-        nav_layout.setSpacing(4)
-
-        # Indicador lateral (barra de color)
-        nav_indicator = QFrame(nav_frame)
-        nav_indicator.setStyleSheet("background-color: #22c55e; border-radius: 3px;")
-        nav_indicator.setGeometry(4, 40, 4, 36)  # posición inicial, se anima luego
-
-        nav_buttons = []
-
-        sections = [
-            ("Inicio", 0),
-            ("Análisis", 1),
-            ("Exportación", 2),
-            ("Configuración", 3),
-        ]
-
-        nav_layout.addSpacing(8)
-
-        for text, index in sections:
-            btn = QPushButton(text, nav_frame)
-            btn.setObjectName("NavButton")
-            btn.setCheckable(True)
-            btn.setCursor(Qt.PointingHandCursor)
-            btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-            btn.clicked.connect(lambda checked, i=index: self._select_nav(i))
-            nav_layout.addWidget(btn)
-            nav_buttons.append(btn)
-
-        nav_layout.addStretch()
-
-        return nav_frame, nav_buttons, nav_indicator
-
-    # ------------------------------------------------------------------
-    # Páginas
-    # ------------------------------------------------------------------
-    def _build_home_page(self) -> QWidget:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(24, 24, 24, 24)
-        layout.setSpacing(16)
-
-        lbl = QLabel(
-            "<b>Bienvenido al Android Forensic Extractor</b><br>"
-            "<br>"
-            "Esta interfaz te permite:<br>"
-            "• Ejecutar análisis forense lógico (No-Root) o profundo (Root).<br>"
-            "• Generar exportaciones legibles en CSV y Excel.<br>"
-            "• Configurar automáticamente ADB y dependencias de Python."
+    def _on_detection_failed(self, message: str):
+        """Cuando falla la detección del dispositivo."""
+        QMessageBox.warning(
+            self,
+            "Detección de dispositivo",
+            message,
         )
-        lbl.setWordWrap(True)
+        self.statusBar().showMessage("Sin dispositivo conectado", 5000)
 
-        layout.addWidget(lbl)
+    # ==================================================================
+    # Callbacks de SettingsView y AnalysisView (acciones principales)
+    # ==================================================================
 
-        steps_box = QGroupBox("Flujo sugerido de trabajo")
-        steps_layout = QVBoxLayout(steps_box)
-
-        lbl_steps = QLabel(
-            "1. Ir a la pestaña <b>Configuración</b> y ejecutar <b>Setup</b> "
-            "para instalar dependencias y configurar ADB.\n"
-            "2. Conectar el dispositivo Android con depuración USB activada.\n"
-            "3. Volver a <b>Análisis</b>, elegir opciones (No-Root / Root, formato) "
-            "y ejecutar el análisis.\n"
-            "4. Revisar la carpeta del caso para ver los datos crudos y los CSV legibles.\n"
-            "5. (Opcional) Usar la pestaña <b>Exportación</b> para re-exportar otro caso "
-            "por la interfaz de línea de comandos."
+    def _on_run_setup(self):
+        """
+        Aquí más adelante puedes llamar a setup.py con subprocess.
+        Por ahora solo mostramos un mensaje.
+        """
+        QMessageBox.information(
+            self,
+            "Setup",
+            "Aquí se ejecutaría setup.py para configurar el entorno.\n"
+            "Integración pendiente.",
         )
-        lbl_steps.setWordWrap(True)
-        steps_layout.addWidget(lbl_steps)
 
-        layout.addWidget(steps_box)
-        layout.addStretch()
-        return page
-
-    def _build_analysis_page(self) -> QWidget:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(24, 24, 24, 24)
-        layout.setSpacing(16)
-
-        # --- Caso y formato ---
-        gb_case = QGroupBox("Caso y formato")
-        case_layout = QVBoxLayout(gb_case)
-
-        row1 = QHBoxLayout()
-        lbl_case = QLabel("Nombre del caso:")
-        self.case_name_edit = QLineEdit()
-        self.case_name_edit.setPlaceholderText("Ej. caso01, dispositivo_Juan, etc.")
-        row1.addWidget(lbl_case)
-        row1.addWidget(self.case_name_edit)
-        case_layout.addLayout(row1)
-
-        row2 = QHBoxLayout()
-        lbl_format = QLabel("Formato principal:")
-        self.format_combo = QComboBox()
-        self.format_combo.addItems([
-            "Completo (RAW solo, máximo detalle técnico)",
-            "Legible (RAW + CSV legibles + resumen Excel)",
-        ])
-        self.format_combo.setCurrentIndex(1)
-
-        row2.addWidget(lbl_format)
-        row2.addWidget(self.format_combo)
-        case_layout.addLayout(row2)
-
-        layout.addWidget(gb_case)
-
-        # --- Opciones de extracción ---
-        gb_extract = QGroupBox("Opciones de extracción")
-        ext_layout = QVBoxLayout(gb_extract)
-
-        row_mode = QHBoxLayout()
-        lbl_mode = QLabel("Modo de análisis:")
-        self.mode_combo = QComboBox()
-        self.mode_combo.addItems([
-            "No-Root (extracción lógica)",
-            "Root (profundo + lógica)"
-        ])
-        self.mode_combo.setCurrentIndex(0)
-        row_mode.addWidget(lbl_mode)
-        row_mode.addWidget(self.mode_combo)
-        ext_layout.addLayout(row_mode)
-
-        # Opciones extra
-        self.chk_backup_logico = QCheckBox("Generar backup lógico con 'adb backup -apk -shared -all'")
-        self.chk_backup_logico.setChecked(False)
-
-        self.chk_media_no_root = QCheckBox("Extraer multimedia lógica (/sdcard/DCIM, Pictures, Movies, WhatsApp/Media)")
-        self.chk_media_no_root.setChecked(False)
-
-        ext_layout.addWidget(self.chk_backup_logico)
-        ext_layout.addWidget(self.chk_media_no_root)
-
-        layout.addWidget(gb_extract)
-
-        # --- Opciones avanzadas ROOT ---
-        gb_root = QGroupBox("Opciones avanzadas (solo se usan si el modo es ROOT)")
-        root_layout = QVBoxLayout(gb_root)
-
-        self.chk_sdcard_root = QCheckBox("Extraer TODO /sdcard completo (muy pesado)")
-        self.chk_sdcard_root.setChecked(False)
-
-        self.chk_dd_root = QCheckBox("Crear imagen dd de /data (userdata.img) (muy pesado, avanzado)")
-        self.chk_dd_root.setChecked(False)
-
-        self.chk_excel_resumen = QCheckBox("Crear archivo Excel resumen (contactos, llamadas, SMS, calendario)")
-        self.chk_excel_resumen.setChecked(True)
-
-        root_layout.addWidget(self.chk_sdcard_root)
-        root_layout.addWidget(self.chk_dd_root)
-        root_layout.addWidget(self.chk_excel_resumen)
-
-        layout.addWidget(gb_root)
-
-        # --- Botón ejecutar ---
-        btn_run = QPushButton("Iniciar análisis y exportación")
-        btn_run.setFixedHeight(40)
-        btn_run.setCursor(Qt.PointingHandCursor)
-        btn_run.clicked.connect(self.on_run_analysis)
-
-        layout.addSpacing(8)
-        layout.addWidget(btn_run, alignment=Qt.AlignRight)
-        layout.addStretch()
-
-        return page
-
-    def _build_export_page(self) -> QWidget:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(24, 24, 24, 24)
-        layout.setSpacing(16)
-
-        info = QLabel(
-            "<b>Exportación</b><br><br>"
-            "Por defecto, cuando ejecutas el análisis desde la pestaña <b>Análisis</b> "
-            "ya se generan las exportaciones legibles (CSV y Excel opcional).<br><br>"
-            "Si quieres re-exportar manualmente otro caso (por ejemplo, después de haber "
-            "modificado archivos lógicos), puedes abrir la herramienta de exportación "
-            "<b>exportacion.py</b> en una consola separada:"
-        )
-        info.setWordWrap(True)
-        layout.addWidget(info)
-
-        btn_cli = QPushButton("Abrir exportacion.py en consola (modo CLI)")
-        btn_cli.setFixedHeight(40)
-        btn_cli.setCursor(Qt.PointingHandCursor)
-        btn_cli.clicked.connect(self.on_run_export_cli)
-        layout.addWidget(btn_cli, alignment=Qt.AlignLeft)
-
-        layout.addStretch()
-        return page
-
-    def _build_settings_page(self) -> QWidget:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(24, 24, 24, 24)
-        layout.setSpacing(16)
-
-        info = QLabel(
-            "<b>Configuración del entorno</b><br><br>"
-            "Aquí puedes ejecutar <b>setup.py</b> para:\n"
-            "• Verificar Python.\n"
-            "• Instalar paquetes de Python requeridos (pandas, PySide6, etc.).\n"
-            "• Verificar/instalar ADB (platform-tools).\n"
-            "• Comprobar Java (opcional para manejo de backups .ab).\n\n"
-            "El proceso puede tardar un poco y mostrará más detalles en la consola "
-            "desde la cual ejecutaste esta interfaz."
-        )
-        info.setWordWrap(True)
-        layout.addWidget(info)
-
-        btn_setup = QPushButton("Ejecutar setup.py (configurar entorno)")
-        btn_setup.setFixedHeight(40)
-        btn_setup.setCursor(Qt.PointingHandCursor)
-        btn_setup.clicked.connect(self.on_run_setup)
-        layout.addWidget(btn_setup, alignment=Qt.AlignLeft)
-
-        layout.addStretch()
-        return page
-
-    # ------------------------------------------------------------------
-    # Navegación + animaciones
-    # ------------------------------------------------------------------
-    def _select_nav(self, index: int, animate: bool = True):
-        # Marcar botón
-        for i, btn in enumerate(self.nav_buttons):
-            btn.setChecked(i == index)
-
-        # Cambiar página con fade
-        self._switch_page(index, animate=animate)
-
-        # Mover indicador
-        btn = self.nav_buttons[index]
-        target_rect = QRect(
-            4,
-            btn.y(),
-            self.nav_indicator.width(),
-            btn.height(),
-        )
-        if not animate:
-            self.nav_indicator.setGeometry(target_rect)
-        else:
-            self.nav_anim.stop()
-            self.nav_anim.setStartValue(self.nav_indicator.geometry())
-            self.nav_anim.setEndValue(target_rect)
-            self.nav_anim.start()
-
-    def _switch_page(self, index: int, animate: bool = True):
-        if animate:
-            # Fade-out rápido y luego cambiamos página y fade-in
-            self.fade_anim.stop()
-            self.fade_effect.setOpacity(0.0)
-            self.stack.setCurrentIndex(index)
-            self.fade_anim.setStartValue(0.0)
-            self.fade_anim.setEndValue(1.0)
-            self.fade_anim.start()
-        else:
-            self.stack.setCurrentIndex(index)
-            self.fade_effect.setOpacity(1.0)
-
-    # ------------------------------------------------------------------
-    # Handlers
-    # ------------------------------------------------------------------
-    def on_detect_device(self):
-        """Intentar detectar dispositivo usando analisis.detect_device()."""
-        try:
-            dev_id = analisis.detect_device()
-            self.lbl_device_status.setText(f"Dispositivo: {dev_id}")
-            self.statusBar().showMessage(f"Dispositivo detectado: {dev_id}", 5000)
-        except Exception as e:
-            self.lbl_device_status.setText("Dispositivo: no detectado")
-            self.statusBar().showMessage("No se encontró dispositivo.", 5000)
-            QMessageBox.warning(self, "ADB", f"No se pudo detectar dispositivo:\n\n{e}")
-
-    def on_run_setup(self):
-        """Ejecuta setup.py (setup_module.main())."""
-        try:
-            self.statusBar().showMessage("Ejecutando setup.py... puede tardar.", 0)
-            QApplication.setOverrideCursor(Qt.WaitCursor)
-            setup_module.main()
+    def _on_run_analysis(self):
+        """
+        Acción del botón 'Iniciar análisis y exportación' de AnalysisView.
+        Lanza un QThread con AnalysisWorker para no congelar la GUI.
+        """
+        if self._analysis_running:
             QMessageBox.information(
                 self,
-                "Setup finalizado",
-                "Setup.py terminó.\nRevisa la consola para ver detalles del proceso."
-            )
-        except Exception as e:
-            QMessageBox.critical(self, "Error en setup", f"Ocurrió un error:\n\n{e}")
-        finally:
-            QApplication.restoreOverrideCursor()
-            self.statusBar().showMessage("Setup ejecutado.", 5000)
-
-    def on_run_export_cli(self):
-        """Lanza exportacion.py en una consola aparte (modo CLI)."""
-        script_path = BASE_DIR / "exportacion.py"
-        if not script_path.exists():
-            QMessageBox.critical(
-                self,
-                "exportacion.py no encontrado",
-                f"No se encontró {script_path}.\nAsegúrate de que esté en la misma carpeta que interfaz.py.",
+                "Análisis en ejecución",
+                "Ya hay un análisis corriendo. Espera a que termine.",
             )
             return
 
-        try:
-            creationflags = 0
-            if os.name == "nt" and hasattr(subprocess, "CREATE_NEW_CONSOLE"):
-                creationflags = subprocess.CREATE_NEW_CONSOLE
+        cfg = self.analysis_view.get_config()
+        # DEBUG opcional: imprime en consola
+        print("Config análisis:", cfg)
 
-            subprocess.Popen(
-                [sys.executable, str(script_path)],
-                cwd=str(BASE_DIR),
-                creationflags=creationflags,
-            )
-            self.statusBar().showMessage("exportacion.py ejecutándose en una consola aparte.", 5000)
-        except Exception as e:
-            QMessageBox.critical(self, "Error al ejecutar exportacion.py", str(e))
+        # Limpiamos log y mostramos mensaje inicial
+        self.analysis_view.log_panel.clear()
+        self.analysis_view.log_panel.append_message(
+            "[*] Iniciando análisis del dispositivo..."
+        )
 
-    def on_run_analysis(self):
-        """Ejecuta AndroidForensicAnalysis desde GUI, sin prompts de consola."""
-        case_name = self.case_name_edit.text().strip() or "caso"
-        fmt_idx = self.format_combo.currentIndex()
-        format_mode = "C" if fmt_idx == 0 else "L"
-        mode_idx = self.mode_combo.currentIndex()
-        mode_root = (mode_idx == 1)
+        # Barra de carga en modo indeterminado
+        self.loading_indicator.start("Analizando dispositivo...")
 
-        # Crear instancia de tu clase de análisis
-        analyzer = analisis.AndroidForensicAnalysis(base_dir=BASE_DIR)
-        analyzer.case_name = case_name
-        analyzer.case_dir = BASE_DIR / "casos" / case_name
-        analyzer.logs_dir = analyzer.case_dir / "logs"
-        analyzer.case_dir.mkdir(parents=True, exist_ok=True)
-        analyzer.logs_dir.mkdir(parents=True, exist_ok=True)
-        analyzer.format_mode = format_mode
-        analyzer.mode_root = mode_root
+        # Preparamos worker + hilo
+        self._analysis_thread = QThread(self)
+        self._analysis_worker = AnalysisWorker(cfg, self.base_dir)
 
-        # Leer checks del GUI
-        backup_flag = self.chk_backup_logico.isChecked()
-        media_flag = self.chk_media_no_root.isChecked()
-        sdcard_flag = self.chk_sdcard_root.isChecked()
-        dd_flag = self.chk_dd_root.isChecked()
-        excel_flag = self.chk_excel_resumen.isChecked()
+        self._analysis_worker.moveToThread(self._analysis_thread)
 
-        # Parchar ask_yes_no de analisis.py para que use las opciones del GUI
-        def gui_ask_yes_no(prompt: str, default: str = "s") -> bool:
-            p = prompt.lower()
-            if "backup lógico completo" in p or "backup logico completo" in p:
-                return backup_flag
-            if "multimedia grande" in p:
-                return media_flag
-            if "todo /sdcard completo" in p:
-                return sdcard_flag
-            if "imagen dd de la partición /data" in p or "imagen dd de la particion /data" in p:
-                return dd_flag
-            if "archivo excel resumen" in p:
-                return excel_flag
-            # Fallback: respetar default
-            return default.lower().startswith("s")
+        # Conexiones de worker
+        self._analysis_thread.started.connect(self._analysis_worker.run)
+        self._analysis_worker.progress.connect(self._on_analysis_progress)
+        self._analysis_worker.finished.connect(self._on_analysis_finished)
+        self._analysis_worker.error.connect(self._on_analysis_error)
 
-        orig_ask_yes_no = analisis.ask_yes_no
-        analisis.ask_yes_no = gui_ask_yes_no
+        # Limpieza al terminar
+        self._analysis_worker.finished.connect(self._cleanup_analysis_thread)
+        self._analysis_worker.error.connect(self._cleanup_analysis_thread)
 
-        try:
-            self.statusBar().showMessage("Ejecutando análisis, esto puede tardar...", 0)
-            QApplication.setOverrideCursor(Qt.WaitCursor)
+        self._analysis_running = True
+        self._analysis_thread.start()
 
-            # Detectar dispositivo y guardar getprop/date
-            analyzer.detect_and_log_device()
+    # ----------------- callbacks del worker -----------------
 
-            # Ejecutar modo raíz / no raíz
-            if analyzer.mode_root:
-                logical_dir = analyzer.extract_root()
-            else:
-                logical_dir = analyzer.extract_no_root()
+    @Slot(str)
+    def _on_analysis_progress(self, msg: str):
+        """Mensajes de progreso desde forensic_bridge / extractores."""
+        self.analysis_view.log_panel.append_message(msg)
+        # Solo actualizamos el texto de la barra; el progreso numérico
+        # se puede aprovechar más adelante si cambias la callback.
+        self.loading_indicator.set_message(msg)
 
-            # Exportar (usa exportacion.py internamente)
-            analyzer.run_export(logical_dir)
+    @Slot(str)
+    def _on_analysis_finished(self, case_dir: str):
+        """Cuando el análisis termina correctamente."""
+        self.analysis_view.log_panel.append_message(
+            f"\n[OK] Análisis completado.\nCarpeta del caso: {case_dir}"
+        )
+        self.loading_indicator.stop("Análisis completado.")
+        self.statusBar().showMessage(f"Análisis completado. Carpeta: {case_dir}", 8000)
+        self._analysis_running = False
 
-            QMessageBox.information(
-                self,
-                "Análisis completado",
-                f"Análisis y exportación finalizados.\n\nCarpeta del caso:\n{analyzer.case_dir}",
-            )
-            self.statusBar().showMessage("Análisis completado correctamente.", 5000)
-        except Exception as e:
-            QMessageBox.critical(self, "Error en análisis", f"Ocurrió un error:\n\n{e}")
-            self.statusBar().showMessage("Error en el análisis.", 5000)
-        finally:
-            # Restaurar ask_yes_no original
-            analisis.ask_yes_no = orig_ask_yes_no
-            QApplication.restoreOverrideCursor()
+    @Slot(str)
+    def _on_analysis_error(self, err: str):
+        """Cuando el análisis lanza una excepción."""
+        self.analysis_view.log_panel.append_message(
+            f"\n[ERROR] Ocurrió un problema durante el análisis:\n{err}"
+        )
+        self.loading_indicator.stop("Error en el análisis.")
+        QMessageBox.critical(
+            self,
+            "Error en análisis",
+            f"Ocurrió un error durante el análisis:\n\n{err}",
+        )
+        self.statusBar().showMessage("Error en el análisis.", 8000)
+        self._analysis_running = False
 
+    def _cleanup_analysis_thread(self, *args):
+        """Detiene y limpia el hilo de análisis."""
+        if self._analysis_thread:
+            self._analysis_thread.quit()
+            self._analysis_thread.wait()
+        self._analysis_thread = None
+        self._analysis_worker = None
 
-# ----------------------------------------------------------------------
-# main
-# ----------------------------------------------------------------------
-def main():
+    # ==================================================================
+    # Helper para lanzar desde main.py
+    # ==================================================================
+
+def run_gui(base_dir: Path | None = None):
     app = QApplication(sys.argv)
     app.setStyleSheet(DARK_STYLESHEET)
 
-    win = MainWindow()
-    win.show()
+    window = MainWindow(base_dir=base_dir)
+    window.show()
 
     sys.exit(app.exec())
 
 
 if __name__ == "__main__":
-    main()
+    # Si ejecutas directamente `python interfaz.py`
+    run_gui()
