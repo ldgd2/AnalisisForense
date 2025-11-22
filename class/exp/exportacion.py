@@ -6,51 +6,38 @@ exportacion.py
 ---------------
 Módulo de EXPORTACIÓN para Android Forensic Extractor.
 
-Responsabilidades:
+Responsabilidades ÚNICAS (después del refactor):
 - Copiar artefactos crudos a export/raw (cadena de custodia).
-- Exportar artefactos legibles (pandas.DataFrame) a:
+- Recibir DataFrames YA NORMALIZADOS desde procesador_legible.ForensicDataProcessor.
+- Exportar esos DataFrames a:
     * CSV (export/legible)
     * Excel (resumen_forense.xlsx)
     * PDF simple (tablas)  [opcional, si reportlab está instalado]
 
-NO parsea los TXT de ADB. Eso lo hace:
-    procesador_legible.ForensicDataProcessor
+Todo lo que sea:
+    - Parseo de TXT / CSV crudos
+    - Renombrar columnas
+    - Ordenar filas
+    - Enriquecer campos (epoch → datetime, códigos → descripciones, etc.)
+debe hacerse en procesador_legible.py.
 
-Uso típico (desde analisis.py o un script externo):
-
-    from pathlib import Path
-    from procesador_legible import ForensicDataProcessor
-    import exportacion
-
-    logical_dir = Path("casos/mi_caso/noroot/logical")   # o root/logical, logical antiguo...
-    case_dir = logical_dir.parents[1]                    # <caso>/...
-
-    processor = ForensicDataProcessor(logical_dir)
-    dfs = processor.load_all()                           # dict[str, DataFrame]
-
-    export_dir = case_dir / "export"
-    raw_dir = export_dir / "raw"
-    legible_dir = export_dir / "legible"
-
-    exportacion.copy_raw_files(logical_dir, raw_dir)
-    exportacion.export_csv_legible(dfs, legible_dir)
-    exportacion.export_excel_resumen(dfs, export_dir / "resumen_forense.xlsx")
-    # exportacion.export_pdf_resumen(dfs, export_dir / "resumen_forense.pdf")
-
-Es compatible con:
-- <caso>/logical                 (versión antigua)
-- <caso>/noroot/logical          (NoRootExtractor)
-- <caso>/root/logical            (RootExtractor)
+Aquí solo formateamos y guardamos, aunque podemos generar
+pequeños resúmenes (agrupaciones) como parte de los reportes.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 from typing import Dict, Iterable, Optional
+from dataclasses import dataclass, field
 
 import pandas as pd
 
-# PDF opcional
+try:
+    from openpyxl.utils import get_column_letter
+except Exception:  # si no hay openpyxl, igual funcionará sin auto-width
+    get_column_letter = None
+
 try:
     from reportlab.lib import colors
     from reportlab.lib.pagesizes import A4
@@ -66,6 +53,91 @@ try:
     _REPORTLAB_AVAILABLE = True
 except Exception:
     _REPORTLAB_AVAILABLE = False
+
+
+# ---------------------------------------------------------------------------
+# Meta de artefactos: nombre de hoja y descripción
+# ---------------------------------------------------------------------------
+
+FORENSIC_ARTIFACT_META: dict[str, dict[str, str]] = {
+    "sms": {
+        "name": "SMS_MMS",
+        "desc": "Mensajes SMS/MMS extraídos del dispositivo.",
+    },
+    "contactos": {
+        "name": "CONTACTOS",
+        "desc": "Contactos de agenda telefónica.",
+    },
+    "llamadas": {
+        "name": "LLAMADAS",
+        "desc": "Registro de llamadas entrantes/salientes/perdidas.",
+    },
+    "calendario": {
+        "name": "CALENDARIO",
+        "desc": "Eventos de calendario asociados a cuentas del dispositivo.",
+    },
+    "whatsapp_mensajes": {
+        "name": "WHATSAPP_MSG",
+        "desc": "Mensajes de chats de WhatsApp (normalizados por procesador_legible).",
+    },
+    "whatsapp_contactos": {
+        "name": "WHATSAPP_CTS",
+        "desc": "Contactos / chats de WhatsApp vinculados.",
+    },
+    "exif_media": {
+        "name": "IMAGENES_EXIF",
+        "desc": "Inventario de imágenes/multimedia con metadatos EXIF/GPS.",
+    },
+    "downloads": {
+        "name": "DESCARGAS",
+        "desc": "Registros del provider de descargas de Android.",
+    },
+    "chrome_history": {
+        "name": "HIST_CHROME",
+        "desc": "Historial de navegación extraído de Google Chrome.",
+    },
+    "gmail_mensajes": {
+        "name": "GMAIL",
+        "desc": "Correos electrónicos extraídos de las bases de datos de Gmail.",
+    },
+    "wifi_redes": {
+        "name": "WIFI",
+        "desc": "Redes WiFi conocidas / configuraciones de red.",
+    },
+    "location": {
+        "name": "UBICACION",
+        "desc": "Registros relacionados con ubicación (GPS / network location).",
+    },
+    "usagestats": {
+        "name": "USAGESTATS",
+        "desc": "Estadísticas de uso de aplicaciones (usagestats).",
+    },
+    "apks": {
+        "name": "APKS",
+        "desc": "APK extraídas desde el dispositivo.",
+    },
+    "packages": {
+        "name": "PAQUETES_APPS",
+        "desc": "Meta de paquetes / aplicaciones instaladas (pm/dumpsys).",
+    },
+}
+
+DFMap = Dict[str, pd.DataFrame]
+
+
+def get_artifact_meta(key: str) -> tuple[str, str]:
+    """
+    Devuelve (nombre_hoja, descripcion) amigables para un artefacto.
+    """
+    info = FORENSIC_ARTIFACT_META.get(
+        key,
+        {
+            "name": key.upper(),
+            "desc": f"Artefacto '{key}' exportado automáticamente.",
+        },
+    )
+    sheet_name = info["name"][:31]  # Excel solo acepta 31 caracteres
+    return sheet_name, info["desc"]
 
 
 # ---------------------------------------------------------------------------
@@ -165,16 +237,17 @@ def copy_raw_files(
 # 2) Exportación a CSV legible
 # ---------------------------------------------------------------------------
 
-DFMap = Dict[str, pd.DataFrame]
-
-
 def _export_sms_csv(df: pd.DataFrame, legible_dir: Path) -> None:
+    """
+    CSV principal + resumen por número.
+    Se asume que df viene normalizado desde procesador_legible:
+    columnas: fecha_hora, numero, tipo_codigo, tipo_descripcion, mensaje
+    """
     legible_dir.mkdir(parents=True, exist_ok=True)
     path_main = legible_dir / "sms_legible.csv"
     df.to_csv(path_main, index=False, encoding="utf-8-sig")
     print(f"  [CSV] {path_main.name}")
 
-    # Resumen por número (si existe la columna 'numero')
     if "numero" in df.columns:
         resumen = (
             df.groupby("numero", dropna=False)
@@ -186,30 +259,27 @@ def _export_sms_csv(df: pd.DataFrame, legible_dir: Path) -> None:
         print(f"  [CSV] {path_res.name}")
 
 
-def _export_contactos_csv(df: pd.DataFrame, legible_dir: Path) -> None:
-    legible_dir.mkdir(parents=True, exist_ok=True)
-    path_main = legible_dir / "contactos_legible.csv"
-    df.to_csv(path_main, index=False, encoding="utf-8-sig")
-    print(f"  [CSV] {path_main.name}")
-
-
 def _export_llamadas_csv(df: pd.DataFrame, legible_dir: Path) -> None:
+    """
+    CSV principal + resumen por número.
+    Se asume que df viene normalizado desde procesador_legible:
+    columnas: fecha_hora, numero, nombre_cache, tipo_codigo, tipo_descripcion, duracion_seg
+    """
     legible_dir.mkdir(parents=True, exist_ok=True)
     path_main = legible_dir / "llamadas_legible.csv"
     df.to_csv(path_main, index=False, encoding="utf-8-sig")
     print(f"  [CSV] {path_main.name}")
 
     if "numero" in df.columns:
+        agg_map = {
+            "total_llamadas": ("tipo_codigo", "count"),
+        }
+        if "duracion_seg" in df.columns:
+            agg_map["duracion_total_seg"] = ("duracion_seg", "sum")
+
         resumen = (
             df.groupby("numero", dropna=False)
-            .agg(
-                total_llamadas=("tipo_codigo", "count")
-                if "tipo_codigo" in df.columns
-                else ("fecha", "count"),
-                duracion_total_seg=("duracion_seg", "sum")
-                if "duracion_seg" in df.columns
-                else ("numero", "size"),
-            )
+            .agg(**agg_map)
             .reset_index()
         )
         path_res = legible_dir / "llamadas_resumen_por_numero.csv"
@@ -217,138 +287,238 @@ def _export_llamadas_csv(df: pd.DataFrame, legible_dir: Path) -> None:
         print(f"  [CSV] {path_res.name}")
 
 
-def _export_calendario_csv(df: pd.DataFrame, legible_dir: Path) -> None:
+def _export_generico_csv(nombre: str, df: pd.DataFrame, legible_dir: Path) -> None:
     legible_dir.mkdir(parents=True, exist_ok=True)
-    path_main = legible_dir / "calendario_legible.csv"
-    df.to_csv(path_main, index=False, encoding="utf-8-sig")
-    print(f"  [CSV] {path_main.name}")
-
-
-def _export_whatsapp_msgs_csv(df: pd.DataFrame, legible_dir: Path) -> None:
-    legible_dir.mkdir(parents=True, exist_ok=True)
-    path_main = legible_dir / "whatsapp_mensajes_legible.csv"
-    df.to_csv(path_main, index=False, encoding="utf-8-sig")
-    print(f"  [CSV] {path_main.name}")
-
-    # Resumen por chat si hay columna chat_jid
-    chat_col = None
-    for c in ("chat_jid", "key_remote_jid", "jid"):
-        if c in df.columns:
-            chat_col = c
-            break
-    if chat_col:
-        resumen = (
-            df.groupby(chat_col, dropna=False)
-            .agg(total_mensajes=(chat_col, "count"))
-            .reset_index()
-        )
-        path_res = legible_dir / "whatsapp_resumen_por_chat.csv"
-        resumen.to_csv(path_res, index=False, encoding="utf-8-sig")
-        print(f"  [CSV] {path_res.name}")
-
-
-def _export_whatsapp_cts_csv(df: pd.DataFrame, legible_dir: Path) -> None:
-    legible_dir.mkdir(parents=True, exist_ok=True)
-    path_main = legible_dir / "whatsapp_contactos_legible.csv"
-    df.to_csv(path_main, index=False, encoding="utf-8-sig")
-    print(f"  [CSV] {path_main.name}")
-
-
-def _export_exif_csv(df: pd.DataFrame, legible_dir: Path) -> None:
-    legible_dir.mkdir(parents=True, exist_ok=True)
-    path_main = legible_dir / "exif_media_legible.csv"
-    df.to_csv(path_main, index=False, encoding="utf-8-sig")
-    print(f"  [CSV] {path_main.name}")
+    path = legible_dir / f"{nombre}.csv"
+    df.to_csv(path, index=False, encoding="utf-8-sig")
+    print(f"  [CSV] {path.name}")
 
 
 def export_csv_legible(dfs: DFMap, legible_dir: Path) -> None:
     """
     Exporta todos los artefactos disponibles en `dfs` a CSV legibles.
 
-    Claves esperadas (según ForensicDataProcessor.load_all()):
-        - "sms"
-        - "contactos"
-        - "llamadas"
-        - "calendario"
-        - "whatsapp_mensajes"
-        - "whatsapp_contactos"
-        - "exif_media"
-
-    Cualquier clave desconocida también se exporta como <clave>.csv genérico.
+    IMPORTANTE:
+    - Se asume que `dfs` viene de ForensicDataProcessor.load_all()
+      y por tanto YA está normalizado y ordenado.
+    - Aquí NO se cambia el contenido de los DataFrames, solo se generan
+      archivos (y algún resumen adicional cuando tiene sentido).
     """
     legible_dir = Path(legible_dir)
     legible_dir.mkdir(parents=True, exist_ok=True)
 
-    handled = set()
+    handled: set[str] = set()
 
     if "sms" in dfs:
         _export_sms_csv(dfs["sms"], legible_dir)
         handled.add("sms")
 
-    if "contactos" in dfs:
-        _export_contactos_csv(dfs["contactos"], legible_dir)
-        handled.add("contactos")
-
     if "llamadas" in dfs:
         _export_llamadas_csv(dfs["llamadas"], legible_dir)
         handled.add("llamadas")
 
-    if "calendario" in dfs:
-        _export_calendario_csv(dfs["calendario"], legible_dir)
-        handled.add("calendario")
-
-    if "whatsapp_mensajes" in dfs:
-        _export_whatsapp_msgs_csv(dfs["whatsapp_mensajes"], legible_dir)
-        handled.add("whatsapp_mensajes")
-
-    if "whatsapp_contactos" in dfs:
-        _export_whatsapp_cts_csv(dfs["whatsapp_contactos"], legible_dir)
-        handled.add("whatsapp_contactos")
-
-    if "exif_media" in dfs:
-        _export_exif_csv(dfs["exif_media"], legible_dir)
-        handled.add("exif_media")
-
-    # Cualquier otra cosa que venga en dfs la exportamos genéricamente
-    for nombre, df in dfs.items():
+    # El resto se exporta de forma genérica 1:1
+    for nombre, df in sorted(dfs.items(), key=lambda x: x[0]):
         if nombre in handled:
             continue
-        fname = f"{nombre}.csv"
-        path = legible_dir / fname
-        df.to_csv(path, index=False, encoding="utf-8-sig")
-        print(f"  [CSV] {fname} (genérico)")
+        _export_generico_csv(nombre, df, legible_dir)
 
 
 # ---------------------------------------------------------------------------
-# 3) Exportación a Excel
+# 3) Exportación a Excel (reporte multi-hoja)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ForensicExcelReport:
+    """
+    Construye un Excel forense con varias hojas:
+    - Una hoja por artefacto (sms, llamadas, exif_media, wifi, correo, etc.).
+    - Cada hoja con los datos tal y como los entregó ForensicDataProcessor.
+    - Hoja RESUMEN que explica qué contiene cada hoja.
+
+    dfs: dict[str, DataFrame] devuelto por ForensicDataProcessor.load_all()
+    excel_path: ruta del .xlsx a crear.
+    """
+    dfs: DFMap
+    excel_path: Path
+    case_name: str | None = None
+    device_id: str | None = None
+    _sheet_info: dict[str, dict[str, str]] = field(default_factory=dict)
+
+    # ----------------- API principal -----------------
+
+    def build(self) -> None:
+        if not self.dfs:
+            print("  [XLSX] No hay DataFrames, Excel no generado.")
+            return
+
+        self.excel_path = Path(self.excel_path)
+        self.excel_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Intento de deducir nombre de caso si no viene
+        if self.case_name is None:
+            try:
+                # .../casos/<caso>/export/resumen_forense.xlsx
+                self.case_name = self.excel_path.parent.parent.name
+            except Exception:
+                self.case_name = ""
+
+        resumen_rows = []
+
+        try:
+            with pd.ExcelWriter(self.excel_path, engine="openpyxl") as writer:
+                # 1) Hojas por artefacto
+                for key, df in sorted(self.dfs.items(), key=lambda x: x[0]):
+                    sheet_name, desc = get_artifact_meta(key)
+
+                    # df_norm: usamos tal cual, solo garantizamos que no esté vacío
+                    if df is None or df.empty:
+                        df_norm = pd.DataFrame({"INFO": ["Sin registros."]})
+                    else:
+                        df_norm = df.copy()
+
+                    startrow = 3  # filas 1-2 para descripción
+                    df_norm.to_excel(
+                        writer,
+                        sheet_name=sheet_name,
+                        index=False,
+                        startrow=startrow,
+                    )
+                    ws = writer.sheets[sheet_name]
+
+                    # Descripción en la primera fila
+                    descripcion = desc or f"Artefacto '{key}' extraído del dispositivo."
+                    if self.case_name:
+                        descripcion = f"Caso: {self.case_name} | {descripcion}"
+                    ws.cell(row=1, column=1, value=descripcion)
+
+                    # Congelar fila de cabeceras
+                    ws.freeze_panes = ws.cell(row=startrow + 1, column=1)
+
+                    # Auto-ancho de columnas
+                    if get_column_letter is not None:
+                        self._auto_width(ws, df_norm)
+
+                    # Info para hoja RESUMEN
+                    resumen_rows.append(
+                        {
+                            "Hoja": sheet_name,
+                            "Artefacto interno": key,
+                            "Filas": int(df_norm.shape[0]),
+                            "Columnas": int(df_norm.shape[1]),
+                            "Descripción": desc,
+                        }
+                    )
+
+                # 2) Hoja RESUMEN
+                if resumen_rows:
+                    df_resumen = pd.DataFrame(resumen_rows)
+                    df_resumen.to_excel(
+                        writer,
+                        sheet_name="RESUMEN",
+                        index=False,
+                    )
+                    ws_res = writer.sheets["RESUMEN"]
+                    ws_res.freeze_panes = ws_res.cell(row=2, column=1)
+                    if get_column_letter is not None:
+                        self._auto_width(ws_res, df_resumen)
+
+            print(f"  [XLSX] Reporte forense avanzado exportado en {self.excel_path}")
+        except Exception as e:
+            print(f"  [!] No se pudo crear el Excel ({self.excel_path.name}): {e}")
+            print("      Aun así, los CSV legibles ya pueden estar generados.")
+
+    # ----------------- Auto-ancho columnas -----------------
+
+    def _auto_width(self, ws, df: pd.DataFrame) -> None:
+        if get_column_letter is None:
+            return
+        for idx, col in enumerate(df.columns, start=1):
+            try:
+                serie = df[col].astype(str)
+                max_len = max(
+                    [len(str(col))]
+                    + [len(x) for x in serie.head(200).tolist()]
+                )
+                max_len = min(max_len + 2, 60)
+                ws.column_dimensions[get_column_letter(idx)].width = max_len
+            except Exception:
+                continue
+
+    # ----------------- PDF (opcional) -----------------
+
+    def build_pdf(self, pdf_path: Path, max_rows_per_table: int = 200) -> None:
+        """
+        Genera un informe PDF simple, una tabla por artefacto.
+        Las columnas y el orden vienen dados por los DataFrames.
+        """
+        if not _REPORTLAB_AVAILABLE:
+            print("  [PDF] reportlab no está instalado; se omite exportación a PDF.")
+            return
+
+        if not self.dfs:
+            print("  [PDF] No hay DataFrames, PDF no generado.")
+            return
+
+        pdf_path = Path(pdf_path)
+        pdf_path.parent.mkdir(parents=True, exist_ok=True)
+
+        styles = getSampleStyleSheet()
+        elements = []
+
+        for key, df in sorted(self.dfs.items(), key=lambda x: x[0]):
+            sheet_name, desc = get_artifact_meta(key)
+
+            elements.append(Paragraph(f"Artefacto: {sheet_name} ({key})", styles["Heading2"]))
+            elements.append(Paragraph(desc, styles["Normal"]))
+            elements.append(Spacer(1, 6))
+
+            if df is None or df.empty:
+                df_norm = pd.DataFrame({"INFO": ["Sin registros."]})
+            else:
+                df_norm = df.copy()
+
+            df_small = df_norm.head(max_rows_per_table).copy()
+            data = [list(df_small.columns)] + df_small.astype(str).values.tolist()
+
+            table = Table(data, repeatRows=1)
+            table.setStyle(
+                TableStyle(
+                    [
+                        ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+                        ("TEXTCOLOR", (0, 0), (-1, 0), colors.black),
+                        ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
+                        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                        ("FONTSIZE", (0, 0), (-1, -1), 8),
+                        ("ALIGN", (0, 0), (-1, 0), "CENTER"),
+                    ]
+                )
+            )
+            elements.append(table)
+            elements.append(Spacer(1, 18))
+
+        doc = SimpleDocTemplate(str(pdf_path), pagesize=A4)
+        try:
+            doc.build(elements)
+            print(f"  [PDF] Resumen exportado en {pdf_path}")
+        except Exception as e:
+            print(f"  [!] Error generando PDF ({pdf_path.name}): {e}")
+
+
+# ---------------------------------------------------------------------------
+# Funciones de alto nivel
 # ---------------------------------------------------------------------------
 
 def export_excel_resumen(dfs: DFMap, excel_path: Path) -> None:
     """
-    Crea un Excel con varias hojas, una por artefacto.
-    `dfs` normalmente es el resultado de ForensicDataProcessor.load_all().
+    Crea un Excel con varias hojas usando ForensicExcelReport.
+    Cada clave de `dfs` (sms, contactos, llamadas, calendario,
+    whatsapp_mensajes, whatsapp_contactos, exif_media, packages, wifi_redes, etc.)
+    se convierte en una hoja.
     """
-    if not dfs:
-        print("  [XLSX] No hay DataFrames, Excel no generado.")
-        return
+    report = ForensicExcelReport(dfs=dfs, excel_path=excel_path)
+    report.build()
 
-    excel_path = Path(excel_path)
-    excel_path.parent.mkdir(parents=True, exist_ok=True)
-
-    try:
-        with pd.ExcelWriter(excel_path, engine="openpyxl") as writer:
-            for nombre, df in dfs.items():
-                hoja = nombre[:31]  # límite de Excel
-                df.to_excel(writer, sheet_name=hoja, index=False)
-        print(f"  [XLSX] Resumen exportado en {excel_path}")
-    except Exception as e:
-        print(f"  [!] No se pudo crear el Excel ({excel_path.name}): {e}")
-        print("      Aun así, los CSV legibles ya pueden estar generados.")
-
-
-# ---------------------------------------------------------------------------
-# 4) Exportación a PDF (opcional)
-# ---------------------------------------------------------------------------
 
 def export_pdf_resumen(
     dfs: DFMap,
@@ -356,84 +526,30 @@ def export_pdf_resumen(
     max_rows_per_table: int = 200,
 ) -> None:
     """
-    Genera un informe PDF simple con tablas para cada artefacto.
-
-    - Requiere reportlab (pip install reportlab).
-    - max_rows_per_table limita el tamaño de cada tabla para
-      evitar PDFs gigantes e inmanejables.
+    Genera un PDF usando ForensicExcelReport.build_pdf().
     """
-    if not _REPORTLAB_AVAILABLE:
-        print("  [PDF] reportlab no está instalado; se omite exportación a PDF.")
-        return
+    report = ForensicExcelReport(dfs=dfs, excel_path=pdf_path)
+    report.build_pdf(pdf_path=pdf_path, max_rows_per_table=max_rows_per_table)
 
-    if not dfs:
-        print("  [PDF] No hay DataFrames, PDF no generado.")
-        return
-
-    pdf_path = Path(pdf_path)
-    pdf_path.parent.mkdir(parents=True, exist_ok=True)
-
-    styles = getSampleStyleSheet()
-    elements = []
-
-    for nombre, df in dfs.items():
-        elements.append(Paragraph(f"Artefacto: {nombre}", styles["Heading2"]))
-        elements.append(Spacer(1, 6))
-
-        if df.empty:
-            elements.append(Paragraph("Sin registros.", styles["Normal"]))
-            elements.append(Spacer(1, 12))
-            continue
-
-        df_small = df.head(max_rows_per_table).copy()
-        data = [list(df_small.columns)] + df_small.astype(str).values.tolist()
-
-        table = Table(data, repeatRows=1)
-        table.setStyle(
-            TableStyle(
-                [
-                    ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
-                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.black),
-                    ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
-                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-                    ("FONTSIZE", (0, 0), (-1, -1), 8),
-                    ("ALIGN", (0, 0), (-1, 0), "CENTER"),
-                ]
-            )
-        )
-        elements.append(table)
-        elements.append(Spacer(1, 18))
-
-    doc = SimpleDocTemplate(str(pdf_path), pagesize=A4)
-    try:
-        doc.build(elements)
-        print(f"  [PDF] Resumen exportado en {pdf_path}")
-    except Exception as e:
-        print(f"  [!] Error generando PDF ({pdf_path.name}): {e}")
-
-
-# ---------------------------------------------------------------------------
-# 5) (Opcional) Helper de alto nivel
-# ---------------------------------------------------------------------------
 
 def export_all_from_dfs(
     logical_dir: Path,
     dfs: DFMap,
     export_dir: Path,
     crear_excel: bool = True,
-    crear_pdf: bool = False,
+    crear_pdf: bool = True,
 ) -> None:
     """
-    Helper para usar desde analisis.py:
+    Flujo completo cuando YA tienes `dfs` desde ForensicDataProcessor:
 
         processor = ForensicDataProcessor(logical_dir)
         dfs = processor.load_all()
-        exportacion.export_all_from_dfs(logical_dir, dfs, case_dir / "export")
+        export_all_from_dfs(logical_dir, dfs, case_dir / "export")
 
-    Separa claramente:
-        - copia raw
-        - CSV legible
-        - Excel/PDF (opcionales)
+    Hace:
+        - copia RAW a export/raw
+        - CSV legible a export/legible
+        - Excel (y PDF opcional) en export/
     """
     export_dir = Path(export_dir)
     raw_dir = export_dir / "raw"
@@ -457,12 +573,10 @@ def export_all_from_dfs(
 
 def export_legible(logical_dir: Path, legible_dir: Path) -> DFMap:
     """
-    Compatibilidad con analisis.py.
+    Parsea los artefactos dentro de `logical_dir` usando ForensicDataProcessor
+    y genera los CSV legibles en `legible_dir`.
 
-    - Parsea los TXT dentro de `logical_dir` usando ForensicDataProcessor.
-    - Genera los CSV legibles en `legible_dir`.
-    - Devuelve el dict de DataFrames (`dfs`) para que analisis.py
-      pueda crear el Excel con export_excel_resumen().
+    Devuelve el dict de DataFrames (`dfs`) para que se pueda crear el Excel.
     """
     from procesador_legible import ForensicDataProcessor
 
@@ -472,27 +586,38 @@ def export_legible(logical_dir: Path, legible_dir: Path) -> DFMap:
 
     print(f"  [LEGIBLE] Procesando {logical_dir} -> {legible_dir}")
 
-    # 1) Parsear los TXT a DataFrames
     processor = ForensicDataProcessor(logical_dir)
     dfs = processor.load_all()   # dict[str, DataFrame]
 
-    # 2) Exportar a CSV legibles
+    # Esto genera los CSV legibles (sms_legible.csv, llamadas_legible.csv, etc.)
     export_csv_legible(dfs, legible_dir)
 
-    # 3) Devolver dfs para que el llamador cree el Excel
     return dfs
 
 
-def exportar_legible(case_root: Path, logical_dir: Path, export_dir: Path) -> None:
+def exportar_legible(
+    case_root: Path,
+    logical_dir: Path,
+    export_dir: Optional[Path] = None,
+) -> None:
     """
-    Versión antigua de alto nivel. Se mantiene por compatibilidad.
+    Versión de alto nivel pensada para llamar desde analisis.py.
 
     Hace todo el flujo:
         - copia RAW a export/raw
         - genera CSV en export/legible
         - crea resumen_forense.xlsx
+
+    Compatibilidad:
+    - Si sólo se llama con (case_root, logical_dir), se asume:
+        export_dir = case_root / "export"
+    - Si se pasa export_dir, se usa ese.
     """
-    export_dir = Path(export_dir)
+    if export_dir is None:
+        export_dir = Path(case_root) / "export"
+    else:
+        export_dir = Path(export_dir)
+
     raw_dir = export_dir / "raw"
     legible_dir = export_dir / "legible"
     export_dir.mkdir(parents=True, exist_ok=True)
@@ -506,33 +631,35 @@ def exportar_legible(case_root: Path, logical_dir: Path, export_dir: Path) -> No
 
     print("\n[*] Generando Excel resumen...")
     export_excel_resumen(dfs, export_dir / "resumen_forense.xlsx")
-def crear_resumen_excel(legible_dir: Path,
-                        nombre_archivo: str = "resumen_forense.xlsx") -> None:
+
+
+def crear_resumen_excel(
+    legible_dir: Path,
+    nombre_archivo: str = "resumen_forense.xlsx",
+) -> None:
     """
-    Crea un Excel con TODAS las tablas legibles (.csv) que existan en la carpeta `legible_dir`.
+    Crea un Excel con TODAS las tablas legibles (.csv) que existan en la
+    carpeta `legible_dir` (una hoja por cada CSV).
 
-    - Una hoja por cada CSV.
-    - Nombre de la hoja = nombre del archivo (sin .csv), saneado a 31 chars.
+    Esta función no usa ForensicDataProcessor; solo mira los CSV que ya existen.
+    Útil si el usuario borra el Excel pero conserva los CSV.
     """
+    legible_dir = Path(legible_dir)
+    excel_path = legible_dir.parent / nombre_archivo
 
-    excel_path = legible_dir / nombre_archivo
-
-    # 1) Verificar que openpyxl exista
     try:
         import openpyxl  # noqa: F401
     except ImportError:
-        print("[!] No se pudo crear el Excel (resumen_forense.xlsx): falta el módulo 'openpyxl'.")
+        print("[!] No se pudo crear el Excel: falta 'openpyxl'.")
         print("    Instálalo con: pip install openpyxl")
         return
 
-    # 2) Buscar todos los CSV legibles en esa carpeta
     csv_files = sorted(legible_dir.glob("*.csv"))
     if not csv_files:
         print(f"[XLSX] No hay CSV legibles en {legible_dir}, Excel no generado.")
         return
 
-    print("[*] Generando Excel resumen...")
-    dfs = {}
+    dfs: Dict[str, pd.DataFrame] = {}
 
     for csv_path in csv_files:
         try:
@@ -542,18 +669,12 @@ def crear_resumen_excel(legible_dir: Path,
             continue
 
         if df.empty:
-            # Si no tiene filas, no tiene mucho sentido meterlo
             continue
 
-        # Nombre de la hoja = nombre del archivo sin extensión
         sheet_name = csv_path.stem
-
-        # Saneamos nombre de hoja para que Excel no se queje
         invalid_chars = [":", "\\", "/", "?", "*", "[", "]"]
         for ch in invalid_chars:
             sheet_name = sheet_name.replace(ch, "_")
-
-        # Excel máximo 31 caracteres
         sheet_name = sheet_name[:31]
 
         dfs[sheet_name] = df
@@ -562,13 +683,8 @@ def crear_resumen_excel(legible_dir: Path,
         print("[XLSX] No hay datos útiles para el Excel, no se genera archivo.")
         return
 
-    # 3) Escribir todas las hojas al mismo archivo xlsx
     with pd.ExcelWriter(excel_path, engine="openpyxl") as writer:
         for sheet_name, df in dfs.items():
             df.to_excel(writer, sheet_name=sheet_name, index=False)
 
     print(f"[XLSX] Excel resumen generado -> {excel_path}")
-
-    def export_legible(*args, **kwargs):
-        # Wrapper para compatibilidad con analisis.py
-        return exportar_legible(*args, **kwargs)

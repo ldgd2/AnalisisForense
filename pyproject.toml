@@ -1,4 +1,4 @@
 [project]
 name = "Android Forensic Extractor"
-version = "0.1.4"
+version = "0.2.0"
 description = "Programa para la extraccion y analisis forense exclusivamente para dispositivos android"

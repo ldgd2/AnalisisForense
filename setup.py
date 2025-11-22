@@ -30,7 +30,9 @@ PLATFORM_TOOLS_URL = (
 REQUIRED_PYTHON_PACKAGES = [
     "pandas",
     "PySide6",
-    "openpyxl"
+    "openpyxl",
+    "PILLOW",
+    "reportlab"
     # agrega aquí más paquetes si los usas: "numpy", "matplotlib", ...
 ]
 

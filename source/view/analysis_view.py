@@ -1,27 +1,28 @@
-# source/view/analysis_view.py
-from PySide6.QtCore import Qt
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+from pathlib import Path
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox,
-    QLabel, QLineEdit, QPushButton, QSplitter, QStackedWidget
+    QLabel, QPushButton, QPlainTextEdit, QProgressBar,
+    QSizePolicy
 )
 
-# 👇 Importamos tus componentes
-from components.mode_selector import ModeSelector
-from components.panel.noroot_options_panel import NoRootOptionsPanel
-from components.panel.root_options_panel import RootOptionsPanel
-from components.panel.artifact_summary_panel import ArtifactSummaryPanel
-from components.panel.log_panel import LogPanel
+from components.mode_selector import ModeSelector  # ajusta el import al nombre real del archivo
 
 
 class AnalysisView(QWidget):
     """
-    Vista principal de ANÁLISIS que integra:
-    - Nombre del caso
-    - ModeSelector (modo NOROOT/ROOT + perfil + formato)
-    - Panel de opciones NOROOT / ROOT (stack intercambiable)
-    - Resumen de artefactos
-    - Panel de log de ejecución
+    Vista principal de análisis:
+    - Configuración de adquisición (ModeSelector)
+    - Log de ejecución auto-ajustable
+    - Botones claros abajo
+    - Animación de carga (QProgressBar indeterminada)
     """
+
+    runAnalysisRequested = Signal(dict)   # settings del ModeSelector
+    cancelAnalysisRequested = Signal()    # cancelar ejecución actual
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -30,197 +31,154 @@ class AnalysisView(QWidget):
         main.setContentsMargins(16, 16, 16, 16)
         main.setSpacing(12)
 
-        # ==========================================================
-        # TOP: Nombre de caso + ModeSelector
-        # ==========================================================
-        top_row = QHBoxLayout()
-        top_row.setSpacing(16)
+        # --- Título ---
+        title = QLabel("<b>Análisis del dispositivo</b>")
+        title.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        main.addWidget(title)
 
-        # --- Caso ---
-        gb_case = QGroupBox("Caso")
-        lay_case = QVBoxLayout(gb_case)
-        lay_case.setContentsMargins(8, 8, 8, 8)
+        # --- Configuración (ModeSelector) ---
+        self.mode_selector = ModeSelector(self)
+        config_group = QGroupBox("Configuración de adquisición")
+        config_layout = QVBoxLayout(config_group)
+        config_layout.setContentsMargins(8, 8, 8, 8)
+        config_layout.addWidget(self.mode_selector)
+        main.addWidget(config_group)
 
-        row_case = QHBoxLayout()
-        lbl_case = QLabel("Nombre del caso:")
-        self.case_name_edit = QLineEdit()
-        self.case_name_edit.setPlaceholderText("Ej. caso01, dispositivo_Juan, etc.")
-        row_case.addWidget(lbl_case)
-        row_case.addWidget(self.case_name_edit, 1)
+        # --- Log de ejecución ---
+        log_group = QGroupBox("Log de ejecución")
+        log_layout = QVBoxLayout(log_group)
+        log_layout.setContentsMargins(8, 8, 8, 8)
 
-        lay_case.addLayout(row_case)
+        self.txt_log = QPlainTextEdit(self)
+        self.txt_log.setReadOnly(True)
+        # Para que se auto-ajuste verticalmente
+        self.txt_log.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.txt_log.setLineWrapMode(QPlainTextEdit.NoWrap)  # puedes cambiar a WidgetWidth si quieres wrap
 
-        top_row.addWidget(gb_case, 2)
+        log_layout.addWidget(self.txt_log)
+        # Este grupo se lleva el espacio central
+        main.addWidget(log_group, 1)  # stretch=1 -> se estira
 
-        # --- ModeSelector (modo / perfil / formato) ---
-        self.mode_selector = ModeSelector()
-        top_row.addWidget(self.mode_selector, 3)
+        # --- Barra inferior: estado + botones ---
+        bottom_bar = QHBoxLayout()
+        bottom_bar.setSpacing(8)
 
-        main.addLayout(top_row)
+        # Animación de carga: barra indeterminada
+        self.progress = QProgressBar(self)
+        self.progress.setRange(0, 0)       # indeterminado
+        self.progress.setTextVisible(False)
+        self.progress.setFixedHeight(10)
+        self.progress.setVisible(False)
 
-        # ==========================================================
-        # CENTRO: opciones + resumen + log
-        # ==========================================================
-        splitter = QSplitter(Qt.Horizontal)
+        self.lbl_status = QLabel("Listo.")
+        self.lbl_status.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
 
-        # --------- LADO IZQUIERDO: Opciones de extracción ----------
-        left_container = QWidget()
-        left_layout = QVBoxLayout(left_container)
-        left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.setSpacing(8)
+        bottom_left = QVBoxLayout()
+        bottom_left.addWidget(self.lbl_status)
+        bottom_left.addWidget(self.progress)
 
-        gb_opts = QGroupBox("Opciones de extracción")
-        lay_opts = QVBoxLayout(gb_opts)
-        lay_opts.setContentsMargins(8, 8, 8, 8)
+        bottom_bar.addLayout(bottom_left)
+        bottom_bar.addStretch()
 
-        # Stack con NOROOT / ROOT
-        self.options_stack = QStackedWidget()
-        self.noroot_panel = NoRootOptionsPanel()
-        self.root_panel = RootOptionsPanel()
-        self.options_stack.addWidget(self.noroot_panel)  # index 0 -> NOROOT
-        self.options_stack.addWidget(self.root_panel)    # index 1 -> ROOT
+        self.btn_run = QPushButton("Iniciar análisis")
+        self.btn_cancel = QPushButton("Cancelar")
+        self.btn_cancel.setEnabled(False)
 
-        lay_opts.addWidget(self.options_stack)
-        left_layout.addWidget(gb_opts)
+        bottom_bar.addWidget(self.btn_run)
+        bottom_bar.addWidget(self.btn_cancel)
 
-        splitter.addWidget(left_container)
+        main.addLayout(bottom_bar)
 
-        # --------- LADO DERECHO: Resumen + Log ----------
-        right_container = QWidget()
-        right_layout = QVBoxLayout(right_container)
-        right_layout.setContentsMargins(0, 0, 0, 0)
-        right_layout.setSpacing(8)
+        # --- Conexiones ---
+        self.btn_run.clicked.connect(self._on_run_clicked)
+        self.btn_cancel.clicked.connect(self._on_cancel_clicked)
 
-        # Resumen de artefactos
-        gb_summary = QGroupBox("Resumen de artefactos")
-        lay_summary = QVBoxLayout(gb_summary)
-        lay_summary.setContentsMargins(8, 8, 8, 8)
+    # -------------------------------------------------
+    # API pública para el controlador
+    # -------------------------------------------------
 
-        self.summary_panel = ArtifactSummaryPanel()
-        lay_summary.addWidget(self.summary_panel)
-
-        # Log de ejecución
-        gb_log = QGroupBox("Registro de ejecución")
-        lay_log = QVBoxLayout(gb_log)
-        lay_log.setContentsMargins(0, 0, 0, 0)
-
-        self.log_panel = LogPanel()
-        lay_log.addWidget(self.log_panel)
-
-        right_layout.addWidget(gb_summary)
-        right_layout.addWidget(gb_log, 1)
-
-        splitter.addWidget(right_container)
-
-        # Un poco de tamaño inicial razonable
-        splitter.setStretchFactor(0, 3)
-        splitter.setStretchFactor(1, 4)
-
-        main.addWidget(splitter, 1)
-
-        # ==========================================================
-        # BOTTOM: botón de ejecución
-        # ==========================================================
-        self.btn_run = QPushButton("Iniciar análisis y exportación")
-        self.btn_run.setFixedHeight(40)
-        self.btn_run.setCursor(Qt.PointingHandCursor)
-        main.addWidget(self.btn_run, alignment=Qt.AlignRight)
-
-        # ==========================================================
-        # Conexiones de señales
-        # ==========================================================
-        self.mode_selector.modeChanged.connect(self._on_mode_changed)
-
-        # aplicar estado inicial (NOROOT)
-        self._on_mode_changed(self.mode_selector.current_mode())
-
-    # --------------------------------------------------------------
-    # Dinámica de UI
-    # --------------------------------------------------------------
-    def _on_mode_changed(self, mode: str):
+    def append_log(self, text: str):
         """
-        Cambia el panel visible según el modo:
-        - "NOROOT" -> NoRootOptionsPanel
-        - "ROOT"   -> RootOptionsPanel
+        Añadir texto al log y auto-scroll al final.
         """
-        if mode == "ROOT":
-            self.options_stack.setCurrentWidget(self.root_panel)
+        if not text:
+            return
+        self.txt_log.appendPlainText(text)
+        sb = self.txt_log.verticalScrollBar()
+        sb.setValue(sb.maximum())
+
+    def clear_log(self):
+        self.txt_log.clear()
+
+    def set_busy(self, busy: bool, message: str | None = None):
+        """
+        Cambia la UI a modo ocupado/libre:
+        - Deshabilita controles mientras corre
+        - Muestra/oculta la animación de carga
+        """
+        self.mode_selector.setEnabled(not busy)
+        self.btn_run.setEnabled(not busy)
+        self.btn_cancel.setEnabled(busy)
+        self.progress.setVisible(busy)
+
+        if message is not None:
+            self.lbl_status.setText(message)
         else:
-            self.options_stack.setCurrentWidget(self.noroot_panel)
+            self.lbl_status.setText("Procesando..." if busy else "Listo.")
 
-    # --------------------------------------------------------------
-    # Lectura de configuración para analisis.py
-    # --------------------------------------------------------------
+    # -------------------------------------------------
+    # Internos
+    # -------------------------------------------------
+
+    def _on_run_clicked(self):
+        # obtienes todos los settings del ModeSelector
+        settings = self.mode_selector.get_settings()
+        self.clear_log()
+        self.set_busy(True, "Iniciando análisis...")
+        self.runAnalysisRequested.emit(settings)
+
+    def _on_cancel_clicked(self):
+        self.set_busy(False, "Análisis cancelado por el usuario.")
+        self.cancelAnalysisRequested.emit()
+        
     def get_config(self) -> dict:
         """
-        Devuelve un dict de configuración combinando:
-        - Nombre del caso
-        - ModeSelector (modo / perfil / formato)
-        - Opciones NOROOT / ROOT desde sus paneles
-
-        Mantiene claves compatibles con la versión anterior
-        (nr_* y algunos sdcard_root / dd_root / excel_resumen)
-        y además incluye subdicts:
-        - "noroot_options"
-        - "root_options"
+        Devuelve la configuración actual para lanzar el análisis.
+        La ventana principal la usa en _on_run_analysis().
         """
-        case_name = self.case_name_edit.text().strip() or "caso"
 
-        settings = self.mode_selector.get_settings()
-        mode = settings["mode"]           # "NOROOT" o "ROOT"
-        profile = settings["profile"]     # "rapido", "completo", "whatsapp_media"
-        fmt = settings["format"]          # "L" o "C"
+        # Ajusta estos nombres a los widgets reales que tengas:
+        case_dir = None
+        output_dir = None
 
-        mode_root = (mode == "ROOT")
+        # Si tienes un QLineEdit para el caso, por ejemplo self.txt_case_dir:
+        if hasattr(self, "txt_case_dir"):
+            text = self.txt_case_dir.text().strip()
+            if text:
+                case_dir = Path(text).expanduser()
 
-        config: dict = {
-            "case_name": case_name,
-            "format_mode": fmt,   # "L" o "C"
-            "mode_root": mode_root,
-            "profile": profile,
+        # Si tienes un QLineEdit para la carpeta de salida:
+        if hasattr(self, "txt_output_dir"):
+            text = self.txt_output_dir.text().strip()
+            if text:
+                output_dir = Path(text).expanduser()
+
+        # Si tienes checkboxes de opciones generales:
+        auto_export = getattr(self, "chk_auto_export", None)
+        open_folder = getattr(self, "chk_open_folder", None)
+
+        cfg = {
+            # directorios (pueden ser None si no los llenaste todavía)
+            "case_dir": case_dir,
+            "output_dir": output_dir,
+
+            # configuración del ModeSelector (modo, perfil, formato, flags finos)
+            "mode_settings": self.mode_selector.get_settings()
+                              if hasattr(self, "mode_selector") else {},
+
+            # flags generales
+            "auto_export": bool(auto_export.isChecked()) if auto_export else False,
+            "open_folder": bool(open_folder.isChecked()) if open_folder else False,
         }
 
-        if mode_root:
-            # -------- ROOT --------
-            root_opts = self.root_panel.to_dict()
-            config["root_options"] = root_opts
-
-            # Compatibilidad con versión antigua:
-            # sdcard_root  -> copiar /sdcard entero
-            # dd_root      -> imagen userdata
-            # excel_resumen -> según formato legible
-            config["sdcard_root"] = root_opts.get("copy_sdcard_entire", False)
-            config["dd_root"] = root_opts.get("userdata_image", False)
-            config["excel_resumen"] = (fmt == "L")
-        else:
-            # -------- NO-ROOT --------
-            nr_opts = self.noroot_panel.to_dict()
-            config["noroot_options"] = nr_opts
-
-            # Mapear a claves antiguas nr_*
-            mapping = {
-                "contacts": "nr_contacts",
-                "calllog": "nr_calllog",
-                "sms": "nr_sms",
-                "calendar": "nr_calendar",
-                "downloads_list": "nr_downloads_list",
-                "chrome_provider": "nr_chrome_provider",
-                "browser_provider": "nr_browser_provider",
-                "gps_dumpsys": "nr_gps_dumpsys",
-                "wifi_dumpsys": "nr_wifi_dumpsys",
-                "net_basic": "nr_net_basic",
-                "package_meta": "nr_package_meta",
-                "apks": "nr_apks",
-                "logcat_dump": "nr_logcat_dump",
-                "bugreport_zip": "nr_bugreport_zip",
-                "adb_backup_all": "nr_adb_backup_all",
-                "whatsapp_public": "nr_whatsapp_public",
-                "whatsapp_media": "nr_whatsapp_media",
-                "copy_device_files": "nr_copy_device_files",
-                "copy_sdcard_entire": "nr_copy_sdcard_entire",
-                "exif_inventory": "nr_exif_inventory",
-            }
-            for src, dst in mapping.items():
-                config[dst] = nr_opts.get(src, False)
-
-        return config
+        return cfg

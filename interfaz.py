@@ -241,7 +241,7 @@ class MainWindow(QMainWindow):
 
     def _on_run_analysis(self):
         """
-        Acción del botón 'Iniciar análisis y exportación' de AnalysisView.
+        Acción del botón 'Iniciar análisis' de AnalysisView.
         Lanza un QThread con AnalysisWorker para no congelar la GUI.
         """
         if self._analysis_running:
@@ -253,19 +253,18 @@ class MainWindow(QMainWindow):
             return
 
         cfg = self.analysis_view.get_config()
-        # DEBUG opcional: imprime en consola
+        # DEBUG opcional
         print("Config análisis:", cfg)
 
-        # Limpiamos log y mostramos mensaje inicial
-        self.analysis_view.log_panel.clear()
-        self.analysis_view.log_panel.append_message(
-            "[*] Iniciando análisis del dispositivo..."
-        )
+        # Limpiar log y poner la UI en modo ocupado
+        self.analysis_view.clear_log()
+        self.analysis_view.append_log("[*] Iniciando análisis del dispositivo...")
+        self.analysis_view.set_busy(True, "Analizando dispositivo...")
 
-        # Barra de carga en modo indeterminado
+        # Barra de carga global
         self.loading_indicator.start("Analizando dispositivo...")
 
-        # Preparamos worker + hilo
+        # Preparar worker + hilo
         self._analysis_thread = QThread(self)
         self._analysis_worker = AnalysisWorker(cfg, self.base_dir)
 
@@ -284,22 +283,19 @@ class MainWindow(QMainWindow):
         self._analysis_running = True
         self._analysis_thread.start()
 
-    # ----------------- callbacks del worker -----------------
-
     @Slot(str)
     def _on_analysis_progress(self, msg: str):
         """Mensajes de progreso desde forensic_bridge / extractores."""
-        self.analysis_view.log_panel.append_message(msg)
-        # Solo actualizamos el texto de la barra; el progreso numérico
-        # se puede aprovechar más adelante si cambias la callback.
+        self.analysis_view.append_log(msg)
         self.loading_indicator.set_message(msg)
 
     @Slot(str)
     def _on_analysis_finished(self, case_dir: str):
         """Cuando el análisis termina correctamente."""
-        self.analysis_view.log_panel.append_message(
+        self.analysis_view.append_log(
             f"\n[OK] Análisis completado.\nCarpeta del caso: {case_dir}"
         )
+        self.analysis_view.set_busy(False, "Análisis completado.")
         self.loading_indicator.stop("Análisis completado.")
         self.statusBar().showMessage(f"Análisis completado. Carpeta: {case_dir}", 8000)
         self._analysis_running = False
@@ -307,9 +303,10 @@ class MainWindow(QMainWindow):
     @Slot(str)
     def _on_analysis_error(self, err: str):
         """Cuando el análisis lanza una excepción."""
-        self.analysis_view.log_panel.append_message(
+        self.analysis_view.append_log(
             f"\n[ERROR] Ocurrió un problema durante el análisis:\n{err}"
         )
+        self.analysis_view.set_busy(False, "Error en el análisis.")
         self.loading_indicator.stop("Error en el análisis.")
         QMessageBox.critical(
             self,
@@ -326,6 +323,7 @@ class MainWindow(QMainWindow):
             self._analysis_thread.wait()
         self._analysis_thread = None
         self._analysis_worker = None
+
 
     # ==================================================================
     # Helper para lanzar desde main.py

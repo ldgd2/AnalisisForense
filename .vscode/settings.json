@@ -1,0 +1,6 @@
+{
+    "python.analysis.extraPaths": [
+        "./class/core",
+        "./source"
+    ]
+}
