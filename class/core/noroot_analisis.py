@@ -67,7 +67,7 @@ class NoRootOptions:
 
     # Historiales / descargas / navegador
     downloads_list: bool = True
-    chrome_provider: bool = False      # sólo si el provider permite (muchos no)
+    chrome_provider: bool = False      # sólo si el provider permite 
     browser_provider: bool = False
 
     # GPS / red
@@ -78,7 +78,7 @@ class NoRootOptions:
 
     # Apps / paquetes
     package_meta: bool = True         # dumpsys package + pm list
-    apks: bool = False                # intentar extraer APKs instaladas (puede fallar)
+    apks: bool = False                # intentar extraer APKs instaladas 
 
     # Sistema / cuentas / settings
     users_accounts: bool = True       # dumpsys user / account
@@ -543,8 +543,6 @@ class NoRootExtractor:
 
         self.log("[*] Generando bugreport (zip)...")
         dest = self.nr_sys / "bugreport.zip"
-
-        # En Android modernos, adb bugreport acepta como argumento el nombre del zip.
         rc, out, err = self.run_cmd([
             "adb", "-s", self.device_id,
             "bugreport", str(dest),
@@ -586,7 +584,7 @@ class NoRootExtractor:
 
         self.log(f"[OK] backup_all.ab -> {backup_path}")
 
-        # Conversión opcional a TAR mediante abe.jar (si existe cerca del proyecto)
+        # Conversión opcional a TAR mediante abe.jar 
         abe_candidates = [
             self.base_dir / "source" / "file" / "abe.jar",
             self.base_dir / "source" / "files" / "abe.jar",
@@ -777,7 +775,6 @@ class NoRootExtractor:
                 "gps_alt": (alt[0] / alt[1]) if isinstance(alt, tuple) else (alt or ""),
             }
         except Exception:
-            # No queremos romper el flujo por una sola imagen
             return None
 
     def _gps_to_decimal(self, coord, ref) -> Optional[float]:

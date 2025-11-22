@@ -205,7 +205,7 @@ def copy_raw_files(
         "ip_route.txt",
         "netcfg.txt",
         "logcat_dump.txt",
-        "bugreport.zip",  # se copia tal cual si existe
+        "bugreport.zip", 
     ]
 
     # Desde logical/

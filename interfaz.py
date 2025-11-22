@@ -27,7 +27,6 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-# --- Asegurar que /source está en sys.path aunque llamen este archivo directamente ---
 
 BASE_DIR = Path(__file__).resolve().parent        # carpeta donde está interfaz.py
 SOURCE_DIR = BASE_DIR / "source"                  # proyecto/source
@@ -35,7 +34,6 @@ SOURCE_DIR = BASE_DIR / "source"                  # proyecto/source
 if str(SOURCE_DIR) not in sys.path:
     sys.path.insert(0, str(SOURCE_DIR))
 
-# A partir de aquí ya podemos importar los módulos dentro de /source
 from PySide6.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QStackedWidget
 from PySide6.QtCore import Qt, QThread, Signal, QObject
 
@@ -340,5 +338,4 @@ def run_gui(base_dir: Path | None = None):
 
 
 if __name__ == "__main__":
-    # Si ejecutas directamente `python interfaz.py`
     run_gui()

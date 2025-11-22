@@ -632,7 +632,6 @@ class ModeSelector(QWidget):
 
     def _on_mode_changed(self, index: int):
         self._update_mode_ui()
-        # Cuando cambio de modo, re-aplico el perfil para ese modo
         self._apply_profile()
         self._emit_all()
 

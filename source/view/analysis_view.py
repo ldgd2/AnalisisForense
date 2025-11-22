@@ -146,12 +146,9 @@ class AnalysisView(QWidget):
         Devuelve la configuración actual para lanzar el análisis.
         La ventana principal la usa en _on_run_analysis().
         """
-
-        # Ajusta estos nombres a los widgets reales que tengas:
         case_dir = None
         output_dir = None
 
-        # Si tienes un QLineEdit para el caso, por ejemplo self.txt_case_dir:
         if hasattr(self, "txt_case_dir"):
             text = self.txt_case_dir.text().strip()
             if text:

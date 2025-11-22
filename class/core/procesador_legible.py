@@ -460,8 +460,6 @@ class ForensicDataProcessor:
         if not path.exists():
             return pd.DataFrame()
         df = pd.read_csv(path)
-
-        # Se podría hacer una normalización más fina aquí, por ahora solo ordenamos.
         sort_cols = [c for c in ("display_name", "name", "jid") if c in df.columns]
         if sort_cols:
             df = df.sort_values(sort_cols)
@@ -495,9 +493,6 @@ class ForensicDataProcessor:
     # -----------------------------------------------------------------------
     # CARGAS ROOT EXTRA (WiFi, navegadores, cuentas, correos, GPS, settings)
     # -----------------------------------------------------------------------
-    # -------------------------------------------------------------------
-    # CARGAS EXTRA ROOT (wifi, navegadores, cuentas, etc.)
-    # -------------------------------------------------------------------
 
     def load_wifi_credentials(self) -> pd.DataFrame:
         """
